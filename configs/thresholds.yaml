@@ -1,0 +1,21 @@
+# Simulated decision policy and cost matrix.
+# Amounts are PaySim's simulated currency units. These costs are illustrative
+# assumptions for threshold selection, not real business figures.
+
+cost_matrix:
+  # Loss when a fraudulent transaction is approved: fixed + fraction * amount.
+  fraud_loss_fixed: 0.0
+  fraud_loss_amount_fraction: 1.0
+  # Cost of declining a legitimate transaction (customer friction, churn risk).
+  false_decline_cost: 50.0
+  # Cost of one manual review, whatever the outcome.
+  review_cost: 5.0
+  # Share of reviewed fraud that analysts stop; the rest is lost.
+  review_fraud_catch_rate: 0.95
+
+policy:
+  # Outcomes: p < review -> APPROVE; review <= p < decline -> REVIEW; p >= decline -> DECLINE.
+  # Thresholds are chosen on validation data to minimize expected cost,
+  # subject to the review queue holding at most this share of traffic.
+  max_review_rate: 0.02
+  threshold_grid_size: 300

@@ -1,202 +1,138 @@
-"""Deterministic synthetic transaction generator for testing and demos."""
+"""Deterministic synthetic transactions in PaySim's raw column format.
 
-from typing import Dict, List, Tuple
+Purpose: tests, CI, demos, load and failure testing, drift simulation.
+It is NOT a source of model-quality results. Its fraud mechanism is a few
+hand-written rules, so any model trained on it learns those rules back.
+
+Because the output uses PaySim's raw columns, it flows through the same
+adapter, validation, EDA and split code as the real dataset.
+
+Fraud mechanism (only on TRANSFER and CASH_OUT, mirroring PaySim):
+* the fraudster usually drains the origin balance (amount == balance), and
+* usually sends the money to a small pool of "mule" destination accounts,
+  which therefore accumulate many incoming transactions.
+"""
+
+from __future__ import annotations
+
+from dataclasses import dataclass, field
+from pathlib import Path
 
 import numpy as np
 import polars as pl
 
 from riskstream.config import load_config
-from riskstream.logging_config import get_logger
-
-logger = get_logger(__name__)
+from riskstream.data.adapters.paysim import PAYSIM_RAW_SCHEMA
 
 
-class SyntheticTransactionGenerator:
-    """Generate realistic synthetic financial transactions for testing."""
+@dataclass
+class SyntheticConfig:
+    seed: int = 42
+    num_transactions: int = 50_000
+    num_steps: int = 240
+    fraud_rate_in_risky_types: float = 0.01
+    type_probabilities: dict[str, float] = field(
+        default_factory=lambda: {
+            "CASH_OUT": 0.35, "PAYMENT": 0.34, "CASH_IN": 0.22, "TRANSFER": 0.08, "DEBIT": 0.01,
+        }
+    )
+    amount_lognormal: dict[str, tuple[float, float]] = field(
+        default_factory=lambda: {
+            "CASH_OUT": (11.5, 1.0), "PAYMENT": (8.5, 1.0), "CASH_IN": (11.3, 1.0),
+            "TRANSFER": (12.0, 1.3), "DEBIT": (8.0, 1.0),
+        }
+    )
+    balance_lognormal: tuple[float, float] = (10.5, 1.8)
+    origin_pool_ratio: float = 0.9
+    customer_dest_pool_ratio: float = 0.2
+    merchant_dest_pool_ratio: float = 0.3
+    mule_dest_pool_size: int = 60
+    fraud_drains_balance_probability: float = 0.9
+    fraud_uses_mule_probability: float = 0.7
 
-    def __init__(self, seed: int = 42, config: Dict = None):
-        """
-        Initialize generator with seed for reproducibility.
+    @classmethod
+    def from_yaml(cls, **overrides: object) -> SyntheticConfig:
+        cfg = dict(load_config("data")["synthetic_generator"])
+        cfg.update({k: v for k, v in overrides.items() if v is not None})
+        cfg["amount_lognormal"] = {k: tuple(v) for k, v in cfg["amount_lognormal"].items()}
+        cfg["balance_lognormal"] = tuple(cfg["balance_lognormal"])
+        return cls(**cfg)
 
-        Args:
-            seed: Random seed
-            config: Optional configuration dict, loads from data.yaml if None
-        """
-        self.seed = seed
-        self.rng = np.random.default_rng(seed)
 
-        if config is None:
-            data_config = load_config("data")
-            self.config = data_config.get("synthetic", {})
-        else:
-            self.config = config
+def generate(cfg: SyntheticConfig) -> pl.DataFrame:
+    """Generate one dataset. The same config always yields identical output."""
+    rng = np.random.default_rng(cfg.seed)
+    n = cfg.num_transactions
+    if n <= 0 or cfg.num_steps <= 0:
+        raise ValueError("num_transactions and num_steps must be positive")
 
-        # Configuration
-        self.fraud_rate = self.config.get("fraud_rate", 0.001)
-        self.transaction_types = self.config.get(
-            "transaction_types", ["PAYMENT", "TRANSFER", "CASH_OUT", "DEBIT", "CASH_IN"]
-        )
-        self.amount_ranges = self.config.get(
-            "amount_ranges",
-            {
-                "PAYMENT": [1.0, 10000.0],
-                "TRANSFER": [100.0, 500000.0],
-                "CASH_OUT": [1.0, 100000.0],
-                "DEBIT": [1.0, 5000.0],
-                "CASH_IN": [1.0, 50000.0],
-            },
-        )
+    steps = np.sort(rng.integers(1, cfg.num_steps + 1, size=n))
 
-        logger.info(f"Initialized SyntheticTransactionGenerator with seed={seed}")
+    types_list = list(cfg.type_probabilities)
+    probs = np.array([cfg.type_probabilities[t] for t in types_list], dtype=float)
+    types = np.array(types_list)[rng.choice(len(types_list), size=n, p=probs / probs.sum())]
 
-    def generate(self, num_transactions: int = 10000, num_steps: int = 100) -> pl.DataFrame:
-        """
-        Generate synthetic transaction dataset.
+    amounts = np.empty(n)
+    for t in types_list:
+        mask = types == t
+        mu, sigma = cfg.amount_lognormal[t]
+        amounts[mask] = rng.lognormal(mu, sigma, size=mask.sum())
+    amounts = np.round(amounts, 2)
 
-        Args:
-            num_transactions: Number of transactions to generate
-            num_steps: Number of time steps to distribute transactions across
+    n_orig = max(1, int(n * cfg.origin_pool_ratio))
+    n_cust = max(1, int(n * cfg.customer_dest_pool_ratio))
+    n_merch = max(1, int(n * cfg.merchant_dest_pool_ratio))
+    orig_idx = rng.integers(0, n_orig, size=n)
+    cust_idx = rng.integers(0, n_cust, size=n)
+    merch_idx = rng.integers(0, n_merch, size=n)
+    to_merchant = np.isin(types, ["PAYMENT", "DEBIT"])
+    dest = np.where(
+        to_merchant,
+        np.char.add("M", (merch_idx + 1_000_000).astype(str)),
+        np.char.add("C", (cust_idx + 5_000_000).astype(str)),
+    )
+    orig = np.char.add("C", (orig_idx + 1_000_000).astype(str))
 
-        Returns:
-            Polars DataFrame with synthetic transactions
-        """
-        logger.info(f"Generating {num_transactions} synthetic transactions over {num_steps} steps")
+    risky = np.isin(types, ["TRANSFER", "CASH_OUT"])
+    is_fraud = risky & (rng.random(n) < cfg.fraud_rate_in_risky_types)
 
-        # Generate transaction IDs
-        transaction_ids = [f"txn_{i:08d}" for i in range(num_transactions)]
+    mu_b, sigma_b = cfg.balance_lognormal
+    old_orig = np.round(rng.lognormal(mu_b, sigma_b, size=n), 2)
+    drains = is_fraud & (rng.random(n) < cfg.fraud_drains_balance_probability)
+    amounts = np.where(drains, old_orig, amounts)
+    # Fraud never moves zero: if the balance was 0, keep the sampled amount.
+    amounts = np.where(amounts <= 0, np.round(rng.lognormal(10, 1, size=n), 2), amounts)
 
-        # Generate temporal distribution
-        steps = self.rng.integers(1, num_steps + 1, size=num_transactions)
+    mule = is_fraud & (rng.random(n) < cfg.fraud_uses_mule_probability)
+    mule_ids = np.char.add("C", (rng.integers(0, cfg.mule_dest_pool_size, size=n) + 9_000_000).astype(str))
+    dest = np.where(mule, mule_ids, dest)
 
-        # Generate transaction types with realistic distribution
-        type_weights = [0.4, 0.2, 0.2, 0.1, 0.1]  # PAYMENT, TRANSFER, CASH_OUT, DEBIT, CASH_IN
-        types = self.rng.choice(self.transaction_types, size=num_transactions, p=type_weights)
+    incoming = types == "CASH_IN"
+    new_orig = np.where(incoming, old_orig + amounts, np.maximum(old_orig - amounts, 0.0))
+    old_dest = np.where(to_merchant, 0.0, np.round(rng.lognormal(mu_b, sigma_b, size=n), 2))
+    new_dest = np.where(
+        to_merchant, 0.0, np.where(incoming, np.maximum(old_dest - amounts, 0.0), old_dest + amounts)
+    )
 
-        # Generate amounts based on transaction type
-        amounts = np.zeros(num_transactions)
-        for i, txn_type in enumerate(types):
-            min_amt, max_amt = self.amount_ranges.get(txn_type, [1.0, 10000.0])
-            # Log-normal distribution for more realistic amounts
-            amounts[i] = self._sample_log_normal(min_amt, max_amt)
+    df = pl.DataFrame(
+        {
+            "step": steps.astype(np.int64),
+            "type": types,
+            "amount": amounts,
+            "nameOrig": orig,
+            "oldbalanceOrg": old_orig,
+            "newbalanceOrig": np.round(new_orig, 2),
+            "nameDest": dest,
+            "oldbalanceDest": old_dest,
+            "newbalanceDest": np.round(new_dest, 2),
+            "isFraud": is_fraud.astype(np.int64),
+            "isFlaggedFraud": np.zeros(n, dtype=np.int64),
+        }
+    )
+    return df.cast(PAYSIM_RAW_SCHEMA)
 
-        # Generate account identifiers
-        num_customers = max(1000, num_transactions // 10)
-        num_merchants = max(500, num_transactions // 20)
 
-        name_origs = [f"C{self.rng.integers(1000000, 9999999)}" for _ in range(num_transactions)]
-
-        # Destinations: merchants for PAYMENT/DEBIT, customers for others
-        name_dests = []
-        for txn_type in types:
-            if txn_type in ["PAYMENT", "DEBIT"]:
-                name_dests.append(f"M{self.rng.integers(1000000, 9999999)}")
-            else:
-                name_dests.append(f"C{self.rng.integers(1000000, 9999999)}")
-
-        # Generate realistic balances
-        oldbalance_orgs = self.rng.exponential(scale=50000, size=num_transactions)
-        newbalance_origs = np.maximum(0, oldbalance_orgs - amounts)
-
-        oldbalance_dests = self.rng.exponential(scale=30000, size=num_transactions)
-        newbalance_dests = oldbalance_dests + amounts
-
-        # Generate fraud labels
-        is_fraud = self._generate_fraud_labels(
-            num_transactions, types, amounts, oldbalance_orgs, newbalance_origs
-        )
-
-        # Create DataFrame
-        df = pl.DataFrame(
-            {
-                "transaction_id": transaction_ids,
-                "step": steps,
-                "type": types,
-                "amount": amounts,
-                "nameOrig": name_origs,
-                "oldbalanceOrg": oldbalance_orgs,
-                "newbalanceOrig": newbalance_origs,
-                "nameDest": name_dests,
-                "oldbalanceDest": oldbalance_dests,
-                "newbalanceDest": newbalance_dests,
-                "isFraud": is_fraud.astype(int),
-            }
-        )
-
-        # Sort by step for chronological ordering
-        df = df.sort("step")
-
-        fraud_count = df["isFraud"].sum()
-        fraud_rate = fraud_count / len(df)
-        logger.info(
-            f"Generated {num_transactions} transactions: "
-            f"{fraud_count} fraudulent ({fraud_rate:.2%})"
-        )
-
-        return df
-
-    def _sample_log_normal(self, min_val: float, max_val: float) -> float:
-        """Sample from log-normal distribution bounded by min and max."""
-        mean = (np.log(min_val) + np.log(max_val)) / 2
-        std = (np.log(max_val) - np.log(min_val)) / 4
-        value = self.rng.lognormal(mean, std)
-        return np.clip(value, min_val, max_val)
-
-    def _generate_fraud_labels(
-        self,
-        num_transactions: int,
-        types: np.ndarray,
-        amounts: np.ndarray,
-        oldbalance_orgs: np.ndarray,
-        newbalance_origs: np.ndarray,
-    ) -> np.ndarray:
-        """
-        Generate fraud labels with realistic patterns.
-
-        Fraud patterns:
-        1. High-value transfers (>200k)
-        2. Complete balance drain cash-outs
-        3. Random fraud at base rate
-        """
-        is_fraud = np.zeros(num_transactions, dtype=bool)
-
-        # Base random fraud
-        num_fraud = int(num_transactions * self.fraud_rate)
-        fraud_indices = self.rng.choice(num_transactions, size=num_fraud, replace=False)
-        is_fraud[fraud_indices] = True
-
-        # Pattern 1: High-value transfers are often fraud
-        high_value_transfers = (types == "TRANSFER") & (amounts > 200000)
-        high_value_indices = np.where(high_value_transfers)[0]
-        fraud_high_value = self.rng.choice(
-            high_value_indices, size=int(len(high_value_indices) * 0.7), replace=False
-        )
-        is_fraud[fraud_high_value] = True
-
-        # Pattern 2: Complete balance drain cash-outs
-        balance_drain = (types == "CASH_OUT") & (
-            np.abs(newbalance_origs - 0) < 0.01
-        )  # Near zero
-        drain_indices = np.where(balance_drain)[0]
-        fraud_drain = self.rng.choice(
-            drain_indices, size=int(len(drain_indices) * 0.8), replace=False
-        )
-        is_fraud[fraud_drain] = True
-
-        return is_fraud
-
-    def generate_streaming_batch(
-        self, batch_size: int = 100, start_step: int = 1
-    ) -> pl.DataFrame:
-        """
-        Generate a small batch for streaming simulation.
-
-        Args:
-            batch_size: Number of transactions in batch
-            start_step: Starting time step
-
-        Returns:
-            Small batch DataFrame
-        """
-        return self.generate(num_transactions=batch_size, num_steps=1).with_columns(
-            pl.lit(start_step).alias("step")
-        )
+def write(df: pl.DataFrame, path: Path) -> Path:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.write_parquet(path, compression="zstd")
+    return path

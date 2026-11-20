@@ -1,195 +1,129 @@
-"""Data ingestion for various datasets."""
+"""Ingestion: raw file -> canonical, validated Parquet in ``data/interim``.
 
+The raw file is only ever read. Outputs:
+
+* ``<interim_dir>/transactions.parquet``: valid canonical rows
+* ``<interim_dir>/rejected.parquet``: quarantined rows with ``_reject_reason``
+* ``<interim_dir>/manifest.json``: raw-file checksum, row counts, schema
+* ``<eda_dir>/validation_report.{json,md}``
+"""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from dataclasses import dataclass
+from datetime import UTC, datetime
 from pathlib import Path
-from typing import Optional
 
 import polars as pl
 
-from riskstream.config import load_config, settings
-from riskstream.data.schemas import PAYSIM_SCHEMA, SYNTHETIC_SCHEMA
-from riskstream.data.validation import DataValidator, validate_file_exists
+from riskstream.config import dataset_config, load_config, resolve_path
+from riskstream.data.adapters import get_adapter
+from riskstream.data.schema import CANONICAL_SCHEMA, ORDER_COLUMNS
+from riskstream.data.validation import ValidationReport, validate, with_rejection_reason
 from riskstream.logging_config import get_logger
 
 logger = get_logger(__name__)
 
 
-class PaySimIngestion:
-    """Ingest and validate PaySim dataset."""
+def file_sha256(path: Path, chunk_size: int = 8 * 1024 * 1024) -> str:
+    """Streamed SHA-256 so a 470 MB file never sits in memory."""
+    digest = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(chunk_size):
+            digest.update(chunk)
+    return digest.hexdigest()
 
-    def __init__(self):
-        """Initialize PaySim ingestion."""
-        self.schema = PAYSIM_SCHEMA
-        self.validator = DataValidator(self.schema)
-        self.config = load_config("data")["paysim"]
 
-    def load_raw(self, file_path: Optional[Path] = None) -> pl.DataFrame:
-        """
-        Load raw PaySim CSV file.
+class DataValidationError(RuntimeError):
+    def __init__(self, report: ValidationReport) -> None:
+        self.report = report
+        details = "; ".join(f"{c.name} ({c.failed_count})" for c in report.failures())
+        super().__init__(f"Validation failed for {report.dataset}: {details}")
 
-        Args:
-            file_path: Path to CSV file, uses config default if None
 
-        Returns:
-            Polars DataFrame with raw data
-        """
-        if file_path is None:
-            file_path = settings.paysim_path
+@dataclass
+class IngestionResult:
+    dataset: str
+    interim_path: Path
+    rejected_path: Path
+    manifest: dict
+    report: ValidationReport
 
-        logger.info(f"Loading PaySim dataset from: {file_path}")
-        validate_file_exists(file_path)
 
-        # Load with Polars lazy API for efficiency
-        df = pl.read_csv(
-            file_path,
-            infer_schema_length=10000,  # Sample for schema inference
+def interim_paths(dataset: str) -> tuple[Path, Path, Path]:
+    d = resolve_path(dataset_config(dataset)["interim_dir"])
+    return d / "transactions.parquet", d / "rejected.parquet", d / "manifest.json"
+
+
+def ingest(dataset: str, raw_path: Path | None = None) -> IngestionResult:
+    """Read, map, validate and persist one dataset."""
+    cfg = dataset_config(dataset)
+    quality = load_config("data")["quality"]
+    adapter = get_adapter(dataset, raw_path)
+    out_path, rejected_path, manifest_path = interim_paths(dataset)
+    eda_dir = resolve_path(cfg["eda_dir"])
+
+    logger.info("Ingesting %s from %s", dataset, adapter.path)
+    raw_problems = adapter.check_raw_columns()
+    if raw_problems:
+        raise ValueError(f"Source schema mismatch for {dataset}: {raw_problems}")
+
+    canonical = adapter.to_canonical(adapter.scan_raw())
+    report = validate(canonical, dataset, quality["max_invalid_row_rate"])
+    eda_dir.mkdir(parents=True, exist_ok=True)
+    (eda_dir / "validation_report.json").write_text(json.dumps(report.to_dict(), indent=2))
+    (eda_dir / "validation_report.md").write_text(report.to_markdown())
+    logger.info(
+        "Validation %s: %s valid, %s rejected",
+        "passed" if report.passed else "FAILED",
+        f"{report.valid_rows:,}",
+        f"{report.rejected_rows:,}",
+    )
+    if not report.passed:
+        raise DataValidationError(report)
+
+    out_path.parent.mkdir(parents=True, exist_ok=True)
+    flagged = with_rejection_reason(canonical)
+    (
+        flagged.filter(pl.col("_reject_reason").is_null())
+        .drop("_reject_reason")
+        .sort(list(ORDER_COLUMNS))
+        .sink_parquet(out_path, compression="zstd")
+    )
+    flagged.filter(pl.col("_reject_reason").is_not_null()).sink_parquet(
+        rejected_path, compression="zstd"
+    )
+
+    manifest = {
+        "dataset": dataset,
+        "is_synthetic_data": adapter.is_synthetic_data,
+        "raw_path": str(adapter.path),
+        "raw_sha256": file_sha256(adapter.path),
+        "raw_size_bytes": adapter.path.stat().st_size,
+        "interim_path": str(out_path),
+        "rows_total": report.total_rows,
+        "rows_valid": report.valid_rows,
+        "rows_rejected": report.rejected_rows,
+        "canonical_schema": {k: str(v) for k, v in CANONICAL_SCHEMA.items()},
+        "created_at": datetime.now(UTC).isoformat(),
+    }
+    manifest_path.write_text(json.dumps(manifest, indent=2))
+    logger.info("Wrote %s (sha256 of raw: %s...)", out_path, manifest["raw_sha256"][:12])
+    return IngestionResult(dataset, out_path, rejected_path, manifest, report)
+
+
+def load_interim(dataset: str) -> pl.LazyFrame:
+    """Lazily scan the validated canonical dataset."""
+    path, _, _ = interim_paths(dataset)
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} not found. Run: python -m riskstream.cli prepare-data --dataset {dataset}"
         )
-
-        logger.info(f"Loaded {len(df)} transactions with {len(df.columns)} columns")
-        return df
-
-    def validate_and_save(
-        self, df: pl.DataFrame, output_path: Optional[Path] = None
-    ) -> pl.DataFrame:
-        """
-        Validate data and save to Parquet.
-
-        Args:
-            df: DataFrame to validate
-            output_path: Output path for validated Parquet file
-
-        Returns:
-            Validated DataFrame
-
-        Raises:
-            ValueError: If validation fails
-        """
-        if output_path is None:
-            output_path = Path(self.config["interim_path"])
-
-        logger.info("Validating PaySim dataset...")
-        validation_result = self.validator.validate(df)
-
-        logger.info(f"Validation result:\n{validation_result}")
-
-        if not validation_result.is_valid:
-            error_msg = f"Validation failed with {len(validation_result.errors)} errors"
-            logger.error(error_msg)
-            for error in validation_result.errors:
-                logger.error(f"  - {error}")
-            raise ValueError(error_msg)
-
-        if validation_result.warnings:
-            logger.warning(f"Found {len(validation_result.warnings)} warnings:")
-            for warning in validation_result.warnings:
-                logger.warning(f"  - {warning}")
-
-        # Save validated data to Parquet
-        output_path.parent.mkdir(parents=True, exist_ok=True)
-        df.write_parquet(output_path, compression="snappy")
-        logger.info(f"Saved validated data to: {output_path}")
-
-        # Save validation report
-        report_path = Path("reports/eda/paysim_validation.txt")
-        report_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(report_path, "w") as f:
-            f.write(str(validation_result))
-        logger.info(f"Saved validation report to: {report_path}")
-
-        return df
-
-    def load_validated(self, file_path: Optional[Path] = None) -> pl.DataFrame:
-        """
-        Load previously validated Parquet file.
-
-        Args:
-            file_path: Path to Parquet file
-
-        Returns:
-            Validated DataFrame
-        """
-        if file_path is None:
-            file_path = Path(self.config["interim_path"])
-
-        logger.info(f"Loading validated data from: {file_path}")
-        validate_file_exists(file_path)
-
-        df = pl.read_parquet(file_path)
-        logger.info(f"Loaded {len(df)} validated transactions")
-        return df
-
-    def ingest(self, force_reload: bool = False) -> pl.DataFrame:
-        """
-        Complete ingestion pipeline: load, validate, save.
-
-        Args:
-            force_reload: If True, reload from CSV even if validated file exists
-
-        Returns:
-            Validated DataFrame
-        """
-        interim_path = Path(self.config["interim_path"])
-
-        if not force_reload and interim_path.exists():
-            logger.info("Loading existing validated data")
-            return self.load_validated(interim_path)
-
-        logger.info("Running full ingestion pipeline")
-        df = self.load_raw()
-        df = self.validate_and_save(df)
-        return df
+    return pl.scan_parquet(path)
 
 
-class SyntheticDataIngestion:
-    """Handle synthetic data loading and validation."""
-
-    def __init__(self):
-        """Initialize synthetic data ingestion."""
-        self.schema = SYNTHETIC_SCHEMA
-        self.validator = DataValidator(self.schema)
-
-    def load(self, file_path: Path) -> pl.DataFrame:
-        """
-        Load synthetic data from Parquet.
-
-        Args:
-            file_path: Path to synthetic data file
-
-        Returns:
-            DataFrame with synthetic transactions
-        """
-        logger.info(f"Loading synthetic data from: {file_path}")
-        validate_file_exists(file_path)
-
-        df = pl.read_parquet(file_path)
-        logger.info(f"Loaded {len(df)} synthetic transactions")
-
-        # Validate
-        validation_result = self.validator.validate(df)
-        if not validation_result.is_valid:
-            logger.error(f"Synthetic data validation failed: {validation_result.errors}")
-            raise ValueError("Synthetic data validation failed")
-
-        return df
-
-
-def load_dataset(dataset_name: str = "paysim", force_reload: bool = False) -> pl.DataFrame:
-    """
-    Convenience function to load any dataset.
-
-    Args:
-        dataset_name: Name of dataset ('paysim' or 'synthetic')
-        force_reload: Force reload from source
-
-    Returns:
-        Loaded and validated DataFrame
-    """
-    if dataset_name == "paysim":
-        ingestion = PaySimIngestion()
-        return ingestion.ingest(force_reload=force_reload)
-    elif dataset_name == "synthetic":
-        config = load_config("data")["synthetic"]
-        file_path = Path(config["output_path"])
-        ingestion = SyntheticDataIngestion()
-        return ingestion.load(file_path)
-    else:
-        raise ValueError(f"Unknown dataset: {dataset_name}")
+def load_manifest(dataset: str) -> dict:
+    _, _, manifest_path = interim_paths(dataset)
+    return json.loads(manifest_path.read_text())

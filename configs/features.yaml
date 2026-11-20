@@ -1,0 +1,24 @@
+# Feature definitions configuration.
+# Changing anything here that alters feature values requires bumping `version`.
+
+version: "1.0.0"
+
+# Behavioral windows, in source time steps (PaySim: 1 step = 1 hour).
+# A window of W for a transaction at step s covers steps [s - W, s - 1].
+# Events in the SAME step are never used: PaySim's within-hour row order is
+# not a real timestamp, so only completed hours count as history.
+windows_hours: [24, 168]
+
+# Feature groups included in each named feature set.
+feature_sets:
+  full: [transaction, balance, dest_behavior, orig_behavior]
+  # Ablation: drops every feature derived from the origin balance, to measure
+  # how much performance depends on PaySim's balance-drain artifact.
+  no_balance: [transaction, dest_behavior, orig_behavior]
+
+# Training-only undersampling of legitimate rows (validation and test keep
+# their real class distribution). Features are computed from the complete
+# event history before sampling.
+training_sampling:
+  negative_sample_rate: 0.10
+  seed: 42

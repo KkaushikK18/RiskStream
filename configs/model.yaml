@@ -1,0 +1,105 @@
+# Model experimentation configuration.
+
+experiment_name: riskstream-fraud
+registered_model_name: riskstream-fraud
+random_seed: 42
+n_jobs: 6                      # leave headroom on an 8-thread laptop
+
+# Model chosen as the candidate: highest validation PR-AUC among supervised
+# models. Fixed before the test set is evaluated.
+selection_metric: pr_auc
+
+# Calibration methods compared with 5-fold cross-fitting on validation scores.
+calibration:
+  methods: [none, sigmoid, isotonic]
+  folds: 5
+  selection_metric: brier
+
+evaluation:
+  precision_at_k: [100, 500]
+  recall_at_fpr: [0.001, 0.01]
+  calibration_bins: 10
+
+# Supervised models and their random-search spaces.
+# Parameter spec forms: {choice: [...]}, {int: [lo, hi]}, {float: [lo, hi]}, {loguniform: [lo, hi]}
+models:
+  logistic_regression:
+    feature_set: full
+    n_trials: 6
+    fixed: {max_iter: 1000}
+    search:
+      C: {loguniform: [0.001, 10.0]}
+      class_weight: {choice: [null, balanced]}
+
+  decision_tree:
+    feature_set: full
+    n_trials: 8
+    search:
+      max_depth: {int: [4, 14]}
+      min_samples_leaf: {choice: [20, 50, 100, 200]}
+      class_weight: {choice: [null, balanced]}
+
+  random_forest:
+    feature_set: full
+    n_trials: 3
+    fixed: {max_samples: 0.25}
+    search:
+      n_estimators: {choice: [100, 200]}
+      # Bounded depth keeps the forest within a 6 GB laptop's memory.
+      max_depth: {choice: [10, 16, 22]}
+      min_samples_leaf: {choice: [20, 50, 100]}
+      max_features: {choice: [sqrt, 0.5]}
+      class_weight: {choice: [null, balanced_subsample]}
+
+  xgboost:
+    feature_set: full
+    n_trials: 10
+    fixed: {tree_method: hist}
+    search:
+      n_estimators: {choice: [200, 400, 600]}
+      max_depth: {int: [3, 8]}
+      learning_rate: {loguniform: [0.02, 0.2]}
+      subsample: {float: [0.6, 1.0]}
+      colsample_bytree: {float: [0.6, 1.0]}
+      min_child_weight: {loguniform: [1.0, 50.0]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 5.0, 20.0]}
+
+  lightgbm:
+    feature_set: full
+    n_trials: 10
+    search:
+      n_estimators: {choice: [200, 400, 600]}
+      num_leaves: {choice: [15, 31, 63, 127]}
+      learning_rate: {loguniform: [0.02, 0.2]}
+      min_child_samples: {choice: [20, 50, 100, 300]}
+      subsample: {float: [0.6, 1.0]}
+      colsample_bytree: {float: [0.6, 1.0]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 5.0, 20.0]}
+
+  # Diagnostic ablation, not a deployment candidate.
+  lightgbm_no_balance:
+    estimator: lightgbm
+    feature_set: no_balance
+    candidate_eligible: false
+    n_trials: 10
+    search:
+      n_estimators: {choice: [200, 400, 600]}
+      num_leaves: {choice: [15, 31, 63, 127]}
+      learning_rate: {loguniform: [0.02, 0.2]}
+      min_child_samples: {choice: [20, 50, 100, 300]}
+      subsample: {float: [0.6, 1.0]}
+      colsample_bytree: {float: [0.6, 1.0]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 5.0, 20.0]}
+
+# Unsupervised anomaly detector. Reported separately: it outputs an anomaly
+# score, not a fraud probability, and is never eligible as the candidate.
+anomaly_detection:
+  isolation_forest:
+    feature_set: full
+    n_estimators: 200
+    max_samples: 256
+    # Trained on legitimate training rows only (semi-supervised novelty setup).
+    train_on: legit_only

@@ -13,7 +13,7 @@ the same regardless of the current working directory.
 
 from __future__ import annotations
 
-from functools import lru_cache
+from functools import cache, lru_cache
 from pathlib import Path
 from typing import Any, Literal
 
@@ -52,7 +52,7 @@ def resolve_path(path: str | Path) -> Path:
     return path if path.is_absolute() else PROJECT_ROOT / path
 
 
-@lru_cache(maxsize=None)
+@cache
 def _load_yaml(path: Path) -> dict[str, Any]:
     with open(path, encoding="utf-8") as f:
         return yaml.safe_load(f) or {}

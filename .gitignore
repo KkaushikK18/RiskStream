@@ -57,18 +57,20 @@ logs/
 # MacOS
 .DS_Store
 
-# Reports (keep structure, ignore generated content)
-reports/eda/*.png
-reports/eda/*.html
-reports/eda/*.json
-reports/model_evaluation/
+# Generated reports. Markdown summaries may be committed; figures and raw JSON are regenerated.
+reports/**/*.png
+reports/**/*.json
 reports/drift/
 reports/load_testing/
 
-# Model artifacts
-models/
-mlruns/
-artifacts/
+# Generated data (raw files are downloaded manually; everything else is rebuilt by the CLI)
+/data/
+
+# Model artifacts and experiment tracking (anchored so src/riskstream/models/ stays tracked)
+/models/
+/mlruns/
+/mlflow.db
+/artifacts/
 
 # Temporary files
 *.tmp

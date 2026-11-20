@@ -1,512 +1,241 @@
 # RiskStream
 
-**Real-Time Fraud Detection and Risk Scoring Platform**
+Real-time fraud detection and risk scoring platform built with traditional
+machine learning. The goal is the full lifecycle of a production ML system:
+data pipeline, point-in-time features, model development, serving,
+streaming, monitoring, retraining and safe deployment.
 
-A production-oriented traditional Machine Learning platform demonstrating end-to-end ML engineering capabilities for fraud detection in financial transactions.
+**Status:** Phases 0-2 are implemented (data pipeline, feature engineering,
+model experimentation). Serving, streaming, monitoring and deployment are not
+built yet; see [Roadmap](#roadmap).
 
-[![Python 3.11+](https://img.shields.io/badge/python-3.11+-blue.svg)](https://www.python.org/downloads/)
-[![License: MIT](https://img.shields.io/badge/License-MIT-yellow.svg)](https://opensource.org/licenses/MIT)
+> Data note: PaySim is a simulation of mobile-money transactions, and the
+> project's synthetic generator is simpler still. No result here describes
+> performance on real payment fraud.
 
----
+## Contents
 
-## 📋 Project Overview
+- [What exists today](#what-exists-today)
+- [Setup](#setup)
+- [Running the pipeline](#running-the-pipeline)
+- [Datasets](#datasets)
+- [Methodology](#methodology)
+- [Results](#results)
+- [Tests](#tests)
+- [Project layout](#project-layout)
+- [Roadmap](#roadmap)
+- [Limitations](#limitations)
 
-RiskStream is a comprehensive ML engineering project that goes beyond simple model training to demonstrate:
+## What exists today
 
-- **Machine Learning Engineering**: Feature engineering, model experimentation, evaluation, and calibration
-- **Backend Engineering**: REST API, real-time inference, streaming, caching, and distributed systems
-- **MLOps**: Experiment tracking, model monitoring, automated retraining, and safe deployment
-
-This is **not** a simple ML demo. It's a complete, production-style platform built to demonstrate practical ML engineering skills for AI/ML Engineer and Applied ML Engineer positions.
-
-### Business Problem
-
-Financial services companies process thousands of transactions and need to evaluate each one for fraud risk in real-time. RiskStream simulates this environment by:
-
-1. Receiving incoming transactions
-2. Computing real-time behavioral features
-3. Scoring transactions with ML models
-4. Making risk-based decisions (APPROVE/REVIEW/DECLINE)
-5. Monitoring model performance and data drift
-6. Triggering automated retraining when needed
-7. Safely deploying improved models
-
----
-
-## 🎯 Project Goals
-
-This project demonstrates three core engineering dimensions:
-
-### A. Machine Learning Engineering
-- Advanced feature engineering with temporal correctness
-- Multiple model experimentation (Logistic Regression, Random Forest, XGBoost, LightGBM)
-- Proper evaluation for imbalanced classification
-- Threshold optimization and model calibration
-- Feature consistency between training and inference
-
-### B. Backend & Distributed Systems
-- FastAPI REST API for real-time inference
-- Redis for online feature store
-- Apache Kafka (Redpanda) for event streaming
-- PostgreSQL for transaction persistence
-- Horizontal scaling and load balancing
-- Failure handling and resilience
-
-### C. MLOps & Production Engineering
-- MLflow for experiment tracking and model registry
-- Evidently for drift and performance monitoring
-- Prefect for orchestration
-- Champion/challenger evaluation
-- Shadow and canary deployments
-- Comprehensive observability with Prometheus and Grafana
-
----
-
-## 🏗️ Architecture
-
-```
-┌─────────────────┐
-│   Transaction   │
-│     Source      │
-└────────┬────────┘
-         │
-         ▼
-┌─────────────────────────────────────────────┐
-│          FastAPI Inference Service          │
-│  ┌─────────────┐  ┌──────────────────────┐ │
-│  │   Feature   │  │   ML Model (LightGBM,│ │
-│  │  Retrieval  │─▶│   XGBoost, etc.)     │ │
-│  │  (Redis)    │  │                      │ │
-│  └─────────────┘  └──────────────────────┘ │
-└──────────┬──────────────────────────────────┘
-           │
-           ▼
-    ┌─────────────┐
-    │  PostgreSQL │
-    │ (Predictions│
-    │  & Labels)  │
-    └─────────────┘
-           │
-           ▼
-    ┌─────────────┐      ┌──────────────┐
-    │   Kafka/    │─────▶│   Streaming  │
-    │  Redpanda   │      │   Consumers  │
-    └─────────────┘      └──────┬───────┘
-                                │
-                         ┌──────▼───────┐
-                         │    Redis     │
-                         │   Feature    │
-                         │    Update    │
-                         └──────────────┘
+```mermaid
+flowchart LR
+    A[PaySim CSV / synthetic generator] --> B[adapter + validation]
+    B --> C[EDA reports]
+    B --> D[chronological split]
+    B --> E[point-in-time features]
+    D --> E
+    E --> F[tune / calibrate / threshold on validation]
+    F --> G[test once]
+    G --> H[versioned model bundle]
+    F -.-> M[(MLflow)]
 ```
 
----
+| component | module |
+|---|---|
+| configuration (env + YAML) and structured logging | `riskstream.config`, `riskstream.logging_config` |
+| canonical schema and dataset adapters | `riskstream.data.schema`, `riskstream.data.adapters` |
+| validation with quarantine of bad rows | `riskstream.data.validation`, `riskstream.data.ingestion` |
+| deterministic synthetic generator | `riskstream.data.synthetic_generator` |
+| EDA report pipeline | `riskstream.data.eda` |
+| chronological split | `riskstream.data.splitting` |
+| feature registry, offline/online computation, parity | `riskstream.features` |
+| estimators, metrics, calibration, cost policy, artifacts | `riskstream.models` |
+| tuning and training pipeline with MLflow | `riskstream.training` |
+| CLI | `riskstream.cli` |
 
-## 📊 Dataset
+Details: [docs/ml_pipeline.md](docs/ml_pipeline.md),
+[docs/data_dictionary.md](docs/data_dictionary.md),
+[docs/decisions/](docs/decisions/).
 
-### Primary Dataset: PaySim
+## Setup
 
-PaySim is a synthetic financial transaction dataset simulating mobile money transactions.
+Requirements: Python 3.11+ (developed on 3.14.3, Windows 11). Docker is not
+needed yet.
 
-- **Source**: [Kaggle - PaySim1](https://www.kaggle.com/datasets/ealaxi/paysim1)
-- **Size**: ~6.3M transactions over 30 days (743 hourly steps)
-- **Features**: Transaction type, amount, origin/destination balances, fraud labels
-- **Characteristics**: Highly imbalanced (~0.13% fraud rate)
-
-**Important**: This dataset is synthetic and used for research/demonstration purposes only. Results do not represent validated performance on real financial transactions.
-
-### Synthetic Data
-
-For testing and development without downloading the full dataset, RiskStream includes a deterministic synthetic transaction generator.
-
----
-
-## 🚀 Phase 1: Foundation & Data Pipeline (CURRENT)
-
-### Status: ✅ Complete
-
-Phase 1 establishes the data foundation:
-
-- ✅ Project structure and dependency management
-- ✅ Configuration management
-- ✅ Structured logging
-- ✅ Synthetic transaction generator
-- ✅ PaySim dataset ingestion and validation
-- ✅ Exploratory Data Analysis (EDA)
-- ✅ Chronological train/val/test splitting
-- ✅ Unit tests
-
----
-
-## 📦 Installation
-
-### Prerequisites
-
-- Python 3.11+ (tested with Python 3.14.3)
-- Git
-- Docker (for later phases)
-
-### Setup
-
-1. **Clone the repository**:
-```bash
-git clone <repository-url>
-cd RiskStream
-```
-
-2. **Create and activate virtual environment**:
-```bash
+```powershell
 python -m venv venv
-
-# Windows
-venv\Scripts\activate
-
-# macOS/Linux
-source venv/bin/activate
+venv\Scripts\activate                      # macOS/Linux: source venv/bin/activate
+python -m pip install -r requirements.txt  # or requirements-lock.txt for exact versions
+python -m pip install -e . --no-deps       # makes `riskstream` importable
+copy .env.example .env                     # macOS/Linux: cp .env.example .env
 ```
 
-3. **Install dependencies**:
-```bash
-pip install -r requirements.txt
+Environment variables (`.env`): `ENVIRONMENT`, `LOG_LEVEL`, `LOG_FORMAT`
+(`text` or `json`), `RANDOM_SEED`, optional `MLFLOW_TRACKING_URI` (default:
+`sqlite:///mlflow.db` in the project root). Pipeline settings live in
+`configs/*.yaml`.
+
+On Windows, set `$env:PYTHONIOENCODING="utf-8"` if a console shows encoding
+errors when printing tables.
+
+## Running the pipeline
+
+Synthetic path (no download, under a minute):
+
+```powershell
+python -m riskstream.cli generate-synthetic
+python -m riskstream.cli prepare-data --dataset synthetic
+python -m riskstream.cli build-features --dataset synthetic
+python -m riskstream.cli train --dataset synthetic --n-trials 1
 ```
 
-4. **Create environment file**:
-```bash
-# Windows
-copy .env.example .env
+PaySim path:
 
-# macOS/Linux
-cp .env.example .env
+```powershell
+python -m riskstream.cli prepare-data --dataset paysim    # ~42 s
+python -m riskstream.cli build-features --dataset paysim  # ~36 s
+python -m riskstream.cli train --dataset paysim           # ~17 min
+python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
----
+Times were measured on an AMD Ryzen 5 3550H laptop (8 threads, 5.9 GB RAM).
 
-## 🎯 Quick Start
+Outputs:
 
-### Option 1: Use PaySim Dataset (Recommended)
+| path | content |
+|---|---|
+| `data/interim/<ds>/` | validated canonical Parquet, rejected rows, manifest with raw SHA-256 |
+| `reports/eda/<ds>/` | `validation_report.md`, `eda_summary.md`, `eda_report.json`, figures |
+| `data/processed/<ds>/splits/` | `train/val/test.parquet`, `split_summary.json` |
+| `data/processed/<ds>/features/v1.0.0/` | feature tables, `feature_schema.json`, `feature_manifest.json` |
+| `reports/model_evaluation/<run>/` | `report.md`, `results.json`, PR, calibration and importance plots |
+| `models/candidates/<run>-<model>/` | model bundle |
 
-1. **Download PaySim dataset** from [Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1)
+## Datasets
 
-2. **Place the CSV** in `data/raw/paysim/PS_20174392719_1491204439457_log.csv`
+**PaySim** ([Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1)): download
+`PS_20174392719_1491204439457_log.csv` (Kaggle login required) and place it at
+`data/raw/paysim/`. The pipeline only reads that file. Verified properties:
+6,362,620 rows, 0 missing values, 0 duplicate rows, 743 hourly steps,
+8,213 fraud rows (0.1291%), fraud only in TRANSFER and CASH_OUT.
 
-3. **Run data preparation pipeline**:
-```bash
-python scripts/prepare_data.py
+**Synthetic** (`riskstream.data.synthetic_generator`): seeded generator that
+writes PaySim's raw format, so it goes through the same pipeline. Use it for
+tests, CI and demos. Its fraud comes from a few hand-written rules, so model
+scores on it mean nothing.
+
+**IEEE-CIS**: not implemented. It would need its own adapter, because its
+columns share nothing with PaySim.
+
+## Methodology
+
+* **Validation**: structural checks fail the dataset; row-level violations are
+  quarantined to `rejected.parquet` with a reason; known PaySim balance
+  inconsistencies are measured but not rejected.
+* **Split**: by `step` at 595 and 669, putting about 80/10/10% of fraud cases
+  in train/val/test. Row shares are 98.1/0.8/1.1% because PaySim's volume
+  collapses late in the month ([ADR 0002](docs/decisions/0002-chronological-split-boundaries.md)).
+* **Features** (34, version 1.0.0): transaction features, origin-balance
+  features, and destination-account behavior over 24 h and 168 h windows,
+  computed point-in-time from earlier hours only. One set of formulas serves
+  both offline and online paths, checked by a parity test
+  ([ADR 0003](docs/decisions/0003-point-in-time-features.md)).
+* **Leakage**: post-transaction balances, the destination's balances and the
+  simulator's `isFlaggedFraud` rule are excluded
+  ([ADR 0004](docs/decisions/0004-leakage-exclusions-and-balance-ablation.md)).
+* **Imbalance, calibration, thresholds**: training-only 10% undersampling of
+  legitimate rows, tuned class weights, validation-fitted calibration, and
+  APPROVE/REVIEW/DECLINE thresholds that minimize a configurable cost
+  ([ADR 0005](docs/decisions/0005-imbalance-calibration-thresholds.md)).
+* **Selection**: highest validation PR-AUC. The test set is read once, for the
+  selected candidate.
+
+## Results
+
+First PaySim run, `reports/model_evaluation/20261120113918-paysim/report.md`:
+
+| model | validation PR-AUC |
+|---|---:|
+| LightGBM (selected; test PR-AUC 1.0000) | 0.9999 |
+| Logistic regression | 0.9997 |
+| XGBoost | 0.9996 |
+| Random forest | 0.9996 |
+| Decision tree | 0.9988 |
+| LightGBM without balance features (ablation) | 0.6222 |
+| Isolation Forest (anomaly score) | 0.0268 |
+
+On the test period the selected model flagged all 838 fraud rows, with 62
+false positives among 67,688 legitimate rows.
+
+These scores reflect a simulator artifact, not detection skill: in 97.82% of
+PaySim fraud rows the amount equals the sender's entire balance, which almost
+never happens for legitimate rows. Without balance features, PR-AUC falls to
+0.62. See [docs/ml_pipeline.md](docs/ml_pipeline.md#how-to-read-these-numbers)
+for this and other caveats, including a cost matrix that leaves the REVIEW
+outcome unused.
+
+To reproduce: run the PaySim commands above. Hyperparameter sampling, data
+sampling and model seeds are fixed. Multi-threaded LightGBM/XGBoost training
+is not guaranteed to be bit-identical across machines.
+
+## Tests
+
+```powershell
+python -m pytest tests -q                # all tests, ~40 s
+python -m pytest tests -q -m "not slow"  # skip the end-to-end training test
+python -m ruff check src tests
 ```
 
-This will:
-- Load and validate the PaySim dataset
-- Generate comprehensive EDA reports
-- Create chronological train/val/test splits
-- Save processed data to `data/processed/`
+| suite | covers |
+|---|---|
+| `tests/unit` | adapter mapping, every validation rule, duplicate handling, tolerance, ordering, synthetic generator determinism, EDA counts, split boundaries and disjointness |
+| `tests/feature_parity` | window boundaries, same-step exclusion, no future leakage, labels never affect features, std/z-score math, offline vs. online parity, duplicate events, pruning |
+| `tests/model` | metrics on hand-computed examples, cost policy, threshold optimizer, calibration, every estimator with NaN input, bundle round-trip and schema check, end-to-end training that reads test exactly once |
 
-### Option 2: Generate Synthetic Demo Data
+All tests use generated or hand-built data; none need the PaySim file.
 
-For quick testing without downloading the full dataset:
-
-```bash
-python scripts/generate_demo_data.py --num-transactions 10000 --run-eda
-```
-
-### Verify Installation
-
-Run tests to ensure everything is working:
-
-```bash
-pytest tests/ -v
-```
-
----
-
-## 📁 Project Structure
+## Project layout
 
 ```
-RiskStream/
-│
-├── README.md                 # This file
-├── pyproject.toml           # Project metadata and dependencies
-├── requirements.txt         # Python dependencies
-├── .env.example             # Environment template
-├── Makefile                 # Convenient commands
-│
-├── configs/                 # Configuration files
-│   ├── logging.yaml
-│   └── data.yaml
-│
-├── data/                    # Data directory (gitignored)
-│   ├── raw/                 # Original datasets
-│   ├── interim/             # Validated data
-│   ├── processed/           # Train/val/test splits
-│   └── synthetic/           # Generated demo data
-│
-├── src/riskstream/          # Main source code
-│   ├── config.py            # Configuration management
-│   ├── logging_config.py    # Logging setup
-│   │
-│   └── data/                # Data pipeline
-│       ├── schemas.py       # Data schemas
-│       ├── validation.py    # Validation logic
-│       ├── ingestion.py     # Data loading
-│       ├── synthetic_generator.py  # Synthetic data
-│       ├── eda.py           # Exploratory analysis
-│       └── preprocessing.py # Splitting and preprocessing
-│
-├── scripts/                 # Executable scripts
-│   ├── prepare_data.py      # Data preparation pipeline
-│   └── generate_demo_data.py  # Synthetic data generation
-│
-├── tests/                   # Test suite
-│   └── unit/                # Unit tests
-│
-└── reports/                 # Generated reports (gitignored)
-    └── eda/                 # EDA visualizations and stats
+configs/           data.yaml, features.yaml, model.yaml, thresholds.yaml
+src/riskstream/    config, logging_config, cli
+  data/            schema, adapters/, validation, ingestion, synthetic_generator, eda, splitting
+  features/        registry, derive, offline, online, parity
+  models/          estimators, evaluation, calibration, artifacts
+  training/        tuning, pipeline
+tests/             unit/, feature_parity/, model/
+docs/              ml_pipeline.md, data_dictionary.md, decisions/
+scripts/           generate_data_dictionary.py
+data/, reports/, models/, mlruns/   generated (git-ignored)
 ```
 
----
-
-## 🧪 Data Pipeline
-
-### Validation
-
-The data pipeline includes comprehensive validation:
-- Schema compliance
-- Missing value analysis
-- Data type checking
-- Categorical value validation
-- Numeric range validation
-- Duplicate detection
-- Target distribution analysis
-
-### Chronological Splitting
-
-**Critical for preventing temporal leakage:**
-
-- **Train set**: Steps 1-595 (~80%)
-- **Validation set**: Steps 596-669 (~10%)
-- **Test set**: Steps 670-743 (~10%)
-
-The test set represents future transactions the model has never seen during training or validation.
-
-### Exploratory Data Analysis
-
-The EDA pipeline generates:
-- Basic statistics and data quality metrics
-- Target distribution analysis
-- Transaction type distributions
-- Amount distributions
-- Fraud patterns by transaction type
-- Temporal transaction patterns
-- Visualizations (PNG charts)
-- JSON report with all metrics
-
-View results in `reports/eda/`.
-
----
-
-## 🧮 Key Statistics (PaySim)
-
-- **Total Transactions**: 6,362,620
-- **Fraud Rate**: ~0.13% (highly imbalanced)
-- **Imbalance Ratio**: ~770:1 (legitimate:fraudulent)
-- **Transaction Types**: CASH_OUT, PAYMENT, CASH_IN, TRANSFER, DEBIT
-- **Highest Fraud Rate**: TRANSFER transactions
-- **Temporal Span**: 743 hourly steps (~30 days)
-
----
-
-## 🔬 Testing
-
-```bash
-# Run all tests
-pytest tests/ -v
-
-# Run unit tests only
-pytest tests/unit/ -v
-
-# Run with coverage
-pytest tests/ -v --cov=src/riskstream --cov-report=html
-
-# View coverage report
-# Open htmlcov/index.html in browser
-```
-
----
-
-## 📈 Development Roadmap
-
-### ✅ Phase 1: Foundation & Data Pipeline (COMPLETE)
-- Project setup and configuration
-- Data ingestion and validation
-- EDA pipeline
-- Chronological splitting
-- Synthetic data generation
-
-### 🚧 Phase 2: ML Experimentation (NEXT)
-- Baseline models (Logistic Regression, Decision Tree)
-- Advanced models (Random Forest, XGBoost, LightGBM)
-- Feature engineering
-- Hyperparameter tuning
-- Threshold optimization
-- Model calibration
-- MLflow experiment tracking
-
-### ⏳ Phase 3: Inference Backend
-- FastAPI application
-- Model loading and serving
-- Request/response schemas
-- Health and readiness endpoints
-- PostgreSQL integration
-
-### ⏳ Phase 4: Online Features & Streaming
-- Redis feature store
-- Kafka/Redpanda integration
-- Event producers and consumers
-- Transaction replay
-
-### ⏳ Phase 5: Local Production Environment
-- Docker Compose orchestration
-- Service configuration
-- Persistent volumes
-- Health checks
-
-### ⏳ Phase 6: Infrastructure Observability
-- Prometheus metrics
-- Grafana dashboards
-- Structured logging
-- Alert rules
-
-### ⏳ Phase 7: Model Monitoring & Retraining
-- Evidently drift detection
-- Performance monitoring
-- Prefect workflows
-- Champion/challenger evaluation
-
-### ⏳ Phase 8: Safe Model Deployment
-- Shadow predictions
-- Canary deployment
-- Model rollback
-
-### ⏳ Phase 9: Scalability & Resilience
-- Horizontal scaling
-- Load testing with Locust
-- Failure injection
-- Performance optimization
-
-### ⏳ Phase 10: AWS Deployment
-- Terraform infrastructure
-- ECS Fargate services
-- Managed databases and caching
-- CloudWatch monitoring
-
-### ⏳ Phase 11: CI/CD & Final Hardening
-- GitHub Actions
-- Automated tests
-- Security checks
-- Documentation
-
----
-
-## 🛠️ Technology Stack
-
-### Core ML & Data
-- Python 3.11+
-- Polars (fast data processing)
-- Pandas (ML integration)
-- Scikit-learn
-- XGBoost
-- LightGBM
-
-### Backend (Future Phases)
-- FastAPI
-- PostgreSQL
-- Redis
-- Apache Kafka (Redpanda)
-
-### MLOps (Future Phases)
-- MLflow
-- Evidently
-- Prefect
-
-### Infrastructure (Future Phases)
-- Docker
-- Docker Compose
-- Terraform
-- AWS (ECR, ECS, RDS, ElastiCache)
-
-### Monitoring (Future Phases)
-- Prometheus
-- Grafana
-- CloudWatch
-
----
-
-## 📝 Key Engineering Decisions
-
-### Why Polars?
-Polars provides significantly better performance and memory efficiency than Pandas for the ~6M row PaySim dataset, especially during CSV loading and Parquet conversion.
-
-### Why Chronological Splitting?
-PaySim has temporal structure (hourly steps). Random splitting would allow the model to learn from "future" transactions, creating unrealistic performance estimates.
-
-### Why Separate Train/Val/Test?
-- **Train**: Model fitting and learning
-- **Validation**: Hyperparameter tuning and threshold selection
-- **Test**: Final unbiased evaluation (never touched during development)
-
-### Why Schema Validation?
-Explicit schemas catch data quality issues early and document expected structure for maintenance and collaboration.
-
----
-
-## 🚨 Important Limitations
-
-1. **Synthetic Data**: PaySim is synthetic. Results are for demonstration only.
-2. **No Real PII**: Never contains real customer or financial data.
-3. **Research Purpose**: Not validated for actual production fraud detection.
-4. **Simplified Features**: Real fraud detection uses far more sophisticated features.
-5. **No Regulatory Compliance**: Doesn't address financial regulations or compliance requirements.
-
----
-
-## 🤝 Contributing
-
-This is a portfolio project for demonstrating ML engineering capabilities. While it's not open for external contributions, the architecture and decisions are documented for learning and reference.
-
----
-
-## 📚 References
-
-- PaySim Dataset: [Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1)
-- Original Paper: Lopez-Rojas, Edgar Alonso; Axelsson, Stefan (2016)
-
----
-
-## 📄 License
-
-MIT License - See LICENSE file for details.
-
----
-
-## 👤 Author
-
-**Kaushik** - Computer Science Undergraduate  
-Building practical ML engineering skills for AI/ML Engineer roles
-
----
-
-## 🎓 Learning Outcomes
-
-This project demonstrates:
-
-✅ End-to-end ML pipeline design  
-✅ Production code quality and testing  
-✅ Data validation and temporal correctness  
-✅ Configuration-driven development  
-✅ Reproducible experiments  
-✅ Clear documentation and communication  
-
-**Next**: Move to Phase 2 for model development and experimentation.
-
----
-
-**Status**: Phase 1 Complete | Last Updated: 2026-11-15
+## Roadmap
+
+| phase | scope | status |
+|---|---|---|
+| 0 | workspace inspection, plan | done |
+| 1 | config, logging, synthetic data, ingestion, validation, EDA, split | done |
+| 2 | features, six model families + anomaly detector, tuning, calibration, thresholds, MLflow, artifacts | done |
+| 3 | FastAPI inference service, PostgreSQL, decision policy | next |
+| 4 | Redis online features, Redpanda streaming, replay | pending |
+| 5 | Docker Compose environment | pending |
+| 6 | Prometheus, Grafana, alerting | pending |
+| 7 | drift, delayed labels, retraining with Prefect, champion/challenger | pending |
+| 8 | shadow and canary deployment, rollback | pending |
+| 9 | load testing, scaling, failure injection | pending |
+| 10 | AWS with Terraform (only with explicit approval) | pending |
+| 11 | CI/CD and hardening | pending |
+
+## Limitations
+
+* PaySim is synthetic; its fraud is easy to separate through the balance
+  artifact. Results do not transfer to real data.
+* Validation and test contain 804 and 838 fraud rows, so metric differences
+  between strong models are within noise.
+* The cost matrix in `configs/thresholds.yaml` is an assumption and currently
+  produces a two-outcome policy.
+* The MLflow model registry is not used yet; bundles are saved to
+  `models/candidates/`. Registration and promotion arrive in Phase 7.
+* Model bundles are pickles: load them only from trusted locations, with the
+  library versions in `requirements-lock.txt`.
