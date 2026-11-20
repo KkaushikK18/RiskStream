@@ -1,98 +1,95 @@
-"""Configuration management for RiskStream."""
+"""Configuration management.
 
-import os
+Two sources of configuration, each with one job:
+
+* Environment variables (``.env``) hold deployment-level settings that change
+  between machines: log level, random seed, tracking URI.
+* YAML files in ``configs/`` hold versioned, reviewable pipeline settings:
+  dataset paths, split boundaries, feature definitions, model search spaces.
+
+All relative paths are resolved against the project root, so commands behave
+the same regardless of the current working directory.
+"""
+
+from __future__ import annotations
+
+from functools import lru_cache
 from pathlib import Path
-from typing import Any, Dict
+from typing import Any, Literal
 
 import yaml
-from pydantic import Field
-from pydantic_settings import BaseSettings
+from pydantic_settings import BaseSettings, SettingsConfigDict
+
+PROJECT_ROOT: Path = Path(__file__).resolve().parents[2]
+CONFIG_DIR: Path = PROJECT_ROOT / "configs"
 
 
 class Settings(BaseSettings):
-    """Application settings loaded from environment variables."""
+    """Environment-level settings. Field names map to upper-case env vars."""
 
-    # Environment
-    environment: str = Field(default="development", env="ENVIRONMENT")
-    random_seed: int = Field(default=42, env="RANDOM_SEED")
-
-    # Logging
-    log_level: str = Field(default="INFO", env="LOG_LEVEL")
-    log_format: str = Field(default="json", env="LOG_FORMAT")
-
-    # Data paths
-    data_raw_dir: Path = Field(default=Path("data/raw"), env="DATA_RAW_DIR")
-    data_interim_dir: Path = Field(default=Path("data/interim"), env="DATA_INTERIM_DIR")
-    data_processed_dir: Path = Field(default=Path("data/processed"), env="DATA_PROCESSED_DIR")
-    data_synthetic_dir: Path = Field(default=Path("data/synthetic"), env="DATA_SYNTHETIC_DIR")
-
-    # PaySim dataset
-    paysim_path: Path = Field(
-        default=Path("data/raw/paysim/PS_20174392719_1491204439457_log.csv"),
-        env="PAYSIM_PATH",
+    model_config = SettingsConfigDict(
+        env_file=PROJECT_ROOT / ".env",
+        env_file_encoding="utf-8",
+        extra="ignore",
     )
 
-    # Chronological split
-    train_end_step: int = Field(default=595, env="TRAIN_END_STEP")
-    val_end_step: int = Field(default=669, env="VAL_END_STEP")
-
-    class Config:
-        env_file = ".env"
-        env_file_encoding = "utf-8"
-        case_sensitive = False
+    environment: str = "development"
+    log_level: str = "INFO"
+    log_format: Literal["text", "json"] = "text"
+    random_seed: int = 42
+    mlflow_tracking_uri: str = f"sqlite:///{(PROJECT_ROOT / 'mlflow.db').as_posix()}"
 
 
-def load_config(config_name: str) -> Dict[str, Any]:
+@lru_cache(maxsize=1)
+def get_settings() -> Settings:
+    """Return the cached environment settings."""
+    return Settings()
+
+
+def resolve_path(path: str | Path) -> Path:
+    """Resolve a config path against the project root unless already absolute."""
+    path = Path(path)
+    return path if path.is_absolute() else PROJECT_ROOT / path
+
+
+@lru_cache(maxsize=None)
+def _load_yaml(path: Path) -> dict[str, Any]:
+    with open(path, encoding="utf-8") as f:
+        return yaml.safe_load(f) or {}
+
+
+def load_config(name: str) -> dict[str, Any]:
+    """Load ``configs/<name>.yaml``.
+
+    Returns a fresh copy so callers can mutate it without affecting the cache.
     """
-    Load a YAML configuration file from the configs/ directory.
+    path = CONFIG_DIR / f"{name}.yaml"
+    if not path.exists():
+        raise FileNotFoundError(f"Configuration file not found: {path}")
+    import copy
 
-    Args:
-        config_name: Name of the config file (without .yaml extension)
-
-    Returns:
-        Dictionary containing configuration
-
-    Raises:
-        FileNotFoundError: If config file doesn't exist
-    """
-    config_path = Path("configs") / f"{config_name}.yaml"
-
-    if not config_path.exists():
-        raise FileNotFoundError(f"Configuration file not found: {config_path}")
-
-    with open(config_path, "r") as f:
-        config = yaml.safe_load(f)
-
-    return config
+    return copy.deepcopy(_load_yaml(path))
 
 
-def get_project_root() -> Path:
-    """
-    Get the project root directory.
-
-    Returns:
-        Path to project root
-    """
-    # Assume this file is in src/riskstream/
-    return Path(__file__).parent.parent.parent
+def dataset_config(dataset: str) -> dict[str, Any]:
+    """Return the ``configs/data.yaml`` section for one dataset."""
+    data_cfg = load_config("data")
+    datasets = data_cfg.get("datasets", {})
+    if dataset not in datasets:
+        raise ValueError(f"Unknown dataset '{dataset}'. Known: {sorted(datasets)}")
+    return datasets[dataset]
 
 
 def ensure_directories() -> None:
-    """Create necessary directories if they don't exist."""
-    settings = Settings()
-    directories = [
-        settings.data_raw_dir,
-        settings.data_interim_dir,
-        settings.data_processed_dir,
-        settings.data_synthetic_dir,
-        Path("logs"),
-        Path("reports/eda"),
-        Path("models"),
-    ]
-
-    for directory in directories:
-        directory.mkdir(parents=True, exist_ok=True)
-
-
-# Global settings instance
-settings = Settings()
+    """Create the working directories used by the pipelines."""
+    for rel in [
+        "data/raw",
+        "data/interim",
+        "data/processed",
+        "data/synthetic",
+        "logs",
+        "reports/eda",
+        "reports/model_evaluation",
+        "models",
+    ]:
+        (PROJECT_ROOT / rel).mkdir(parents=True, exist_ok=True)
