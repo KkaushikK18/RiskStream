@@ -1,26 +1,33 @@
-# Core data processing
-numpy>=1.26.0,<2.0
-polars>=0.20.0
-pandas>=2.1.0
-pyarrow>=15.0.0
+# RiskStream direct dependencies (Phase 1 + Phase 2).
+# Exact resolved versions are recorded in requirements-lock.txt
+# (regenerate with: python -m pip freeze --exclude-editable > requirements-lock.txt).
+# Tested on Python 3.14.3 (Windows).
 
-# ML foundations
-scikit-learn>=1.4.0
+# Data processing
+numpy>=2.3
+polars>=1.30
+pandas>=2.3
+pyarrow>=21.0
 
 # Configuration and validation
-pydantic>=2.6.0
-pydantic-settings>=2.2.0
-python-dotenv>=1.0.0
+pydantic>=2.11
+pydantic-settings>=2.10
+python-dotenv>=1.1
 pyyaml>=6.0
 
-# Development and testing
-pytest>=8.0.0
-pytest-cov>=4.1.0
-ruff>=0.2.0
-mypy>=1.8.0
+# Machine learning
+scikit-learn>=1.7
+lightgbm>=4.6
+xgboost>=3.0
+joblib>=1.5
 
-# Notebooks and visualization
-ipython>=8.20.0
-jupyter>=1.0.0
-matplotlib>=3.8.0
-seaborn>=0.13.0
+# Experiment tracking / model registry
+mlflow>=3.4
+
+# Reporting
+matplotlib>=3.10
+
+# Development and testing
+pytest>=8.4
+pytest-cov>=7.0
+ruff>=0.13
