@@ -96,6 +96,7 @@ PaySim path:
 python -m riskstream.cli prepare-data --dataset paysim    # ~42 s
 python -m riskstream.cli build-features --dataset paysim  # ~36 s
 python -m riskstream.cli train --dataset paysim           # ~17 min
+python -m riskstream.cli tune-policy --dataset paysim     # ~10 s, thresholds only
 python -m mlflow ui --backend-store-uri sqlite:///mlflow.db
 ```
 
@@ -172,8 +173,12 @@ These scores reflect a simulator artifact, not detection skill: in 97.82% of
 PaySim fraud rows the amount equals the sender's entire balance, which almost
 never happens for legitimate rows. Without balance features, PR-AUC falls to
 0.62. See [docs/ml_pipeline.md](docs/ml_pipeline.md#how-to-read-these-numbers)
-for this and other caveats, including a cost matrix that leaves the REVIEW
-outcome unused.
+for this and other caveats.
+
+Decision thresholds are tuned separately from the model with
+`python -m riskstream.cli tune-policy --dataset paysim` (no retraining). With
+the current cost assumptions, 0.11% of validation payments go to REVIEW and
+1.62% are declined.
 
 To reproduce: run the PaySim commands above. Hyperparameter sampling, data
 sampling and model seeds are fixed. Multi-threaded LightGBM/XGBoost training
@@ -233,8 +238,9 @@ data/, reports/, models/, mlruns/   generated (git-ignored)
   artifact. Results do not transfer to real data.
 * Validation and test contain 804 and 838 fraud rows, so metric differences
   between strong models are within noise.
-* The cost matrix in `configs/thresholds.yaml` is an assumption and currently
-  produces a two-outcome policy.
+* The costs in `configs/thresholds.yaml` are assumptions, not business figures.
+  Policies are therefore written as `unapproved`
+  ([ADR 0006](docs/decisions/0006-decision-policy.md)).
 * The MLflow model registry is not used yet; bundles are saved to
   `models/candidates/`. Registration and promotion arrive in Phase 7.
 * Model bundles are pickles: load them only from trusted locations, with the

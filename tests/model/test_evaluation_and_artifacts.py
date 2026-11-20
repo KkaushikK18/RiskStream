@@ -61,6 +61,54 @@ def test_threshold_optimizer_respects_review_cap_and_beats_baseline():
     assert th.review <= th.decline
 
 
+def test_amount_scaled_decline_cost():
+    cm = CostMatrix(0.0, 1.0, 25.0, 5.0, 0.95, false_decline_amount_fraction=0.02)
+    y = np.array([0, 0])
+    p = np.array([0.9, 0.9])
+    out = policy_cost(y, p, np.array([1000.0, 400_000.0]), DecisionThresholds(0.5, 0.5), cm)
+    # (25 + 20) + (25 + 8000)
+    assert out["components"]["false_decline_cost"] == pytest.approx(8070.0)
+
+
+def _uncertain_scores(n=20_000, seed=0):
+    rng = np.random.default_rng(seed)
+    y = (rng.random(n) < 0.02).astype(int)
+    # Overlapping score distributions, like a model without the PaySim balance artifact.
+    p = np.clip(rng.beta(1, 30, n) + y * rng.beta(2, 5, n), 0, 1)
+    amount = rng.lognormal(12, 1, n)
+    return y, p, amount
+
+
+def test_flat_decline_cost_never_reviews_large_payments():
+    """Reproduces the reported problem: a flat 50 makes declining cheaper than reviewing."""
+    y, p, amount = _uncertain_scores()
+    th = optimize_thresholds(y, p, amount, CostMatrix(0.0, 1.0, 50.0, 5.0, 0.95), 0.02, 200)
+    assert policy_cost(y, p, amount, th, CostMatrix(0.0, 1.0, 50.0, 5.0, 0.95))["rates"]["review"] == 0.0
+
+
+def test_amount_scaled_decline_cost_uses_review():
+    y, p, amount = _uncertain_scores()
+    cm = CostMatrix(0.0, 1.0, 25.0, 5.0, 0.95, false_decline_amount_fraction=0.02)
+    th = optimize_thresholds(y, p, amount, cm, 0.02, 200)
+    out = policy_cost(y, p, amount, th, cm)
+    assert out["rates"]["review"] > 0.0
+    assert out["rates"]["review"] <= 0.02 + 1e-9
+    assert th.review < th.decline
+
+
+def test_optimizer_matches_brute_force_on_small_grid():
+    y, p, amount = _uncertain_scores(n=400, seed=3)
+    cm = CostMatrix(0.0, 1.0, 25.0, 5.0, 0.95, false_decline_amount_fraction=0.02)
+    th = optimize_thresholds(y, p, amount, cm, 0.05, 40)
+    best = policy_cost(y, p, amount, th, cm)["total_cost"]
+    cand = np.unique(np.concatenate([np.quantile(p, np.linspace(0.5, 1.0, 40)), [NEVER]]))
+    for r in cand:
+        for d in cand[cand >= r]:
+            t = DecisionThresholds(r, d)
+            if (t.decide(p) == 1).mean() <= 0.05:
+                assert policy_cost(y, p, amount, t, cm)["total_cost"] >= best - 1e-6
+
+
 def test_threshold_optimizer_can_choose_never():
     y = np.zeros(1000, dtype=int)
     p = np.linspace(0, 1, 1000)

@@ -30,6 +30,7 @@ flowchart LR
 | ingest + validate + EDA + split | `python -m riskstream.cli prepare-data --dataset paysim` | `data/interim/paysim/`, `reports/eda/paysim/`, `data/processed/paysim/splits/` |
 | features | `python -m riskstream.cli build-features --dataset paysim` | `data/processed/paysim/features/v1.0.0/` |
 | training | `python -m riskstream.cli train --dataset paysim` | `reports/model_evaluation/<version>/`, `models/candidates/<version>-<model>/`, MLflow run |
+| decision policy | `python -m riskstream.cli tune-policy --dataset paysim` | `models/policies/<model_version>/`, `reports/policy/` |
 | experiment UI | `python -m mlflow ui --backend-store-uri sqlite:///mlflow.db` | http://127.0.0.1:5000 |
 
 Replace `paysim` with `synthetic` to run every step on generated data in seconds.
@@ -112,13 +113,18 @@ committing to get a fully traceable run.
   into ties. The ablation's best raw trial scored 0.6387 before calibration
   and 0.6222 after.
 
-### Known issue: the cost matrix makes REVIEW unused
+### Decision policy (fixed after the first run)
 
-With the configured costs (fraud loss = full amount, false decline = 50,
-review = 5, reviews stop 95% of fraud), the optimizer set REVIEW and DECLINE
-to the same threshold. Letting 5% of a reviewed fraud through costs far more
-than declining a legitimate payment (PaySim fraud amounts: mean 1.47 million, median 441,423).
-For the weaker ablation model, the same costs make it
-"optimal" to decline 32.8% of all validation traffic. The thresholds are
-correct for the stated costs; the costs themselves are unrealistic. Choosing
-a realistic cost matrix is an open decision before Phase 3.
+The first run used a flat wrong-decline cost of 50, which made REVIEW unused
+(the thresholds inside the training report above come from it). The cost now
+grows with the payment amount, and thresholds are chosen by a separate
+command that does not retrain:
+
+```powershell
+python -m riskstream.cli tune-policy --dataset paysim
+```
+
+It writes a versioned policy file under `models/policies/` and a report with a
+sensitivity table under `reports/policy/`. For the current model, 0.11% of
+validation payments go to REVIEW and 1.62% are declined. See
+[ADR 0006](decisions/0006-decision-policy.md).

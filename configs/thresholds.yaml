@@ -1,21 +1,44 @@
-# Simulated decision policy and cost matrix.
-# Amounts are PaySim's simulated currency units. These costs are illustrative
-# assumptions for threshold selection, not real business figures.
+# Decision policy: cost matrix, review capacity and sensitivity grid.
+#
+# The decision policy is versioned separately from the model. Changing costs
+# here and running `python -m riskstream.cli tune-policy` produces a new policy
+# file for an existing model, without retraining.
+#
+# Amounts are PaySim's simulated currency units. In a real deployment the fraud
+# operations and finance teams own these numbers; here they are documented
+# assumptions (see docs/decisions/0006-decision-policy.md).
+
+policy_version: "2.0.0"
+owner: "unassigned (portfolio project: assumptions, not business-approved figures)"
 
 cost_matrix:
-  # Loss when a fraudulent transaction is approved: fixed + fraction * amount.
+  # Approving a fraud loses the payment: fixed + fraction * amount.
   fraud_loss_fixed: 0.0
   fraud_loss_amount_fraction: 1.0
-  # Cost of declining a legitimate transaction (customer friction, churn risk).
-  false_decline_cost: 50.0
-  # Cost of one manual review, whatever the outcome.
+  # Declining a legitimate payment: fixed + fraction * amount.
+  # The fixed part covers support contact; the amount part covers lost fees and
+  # the chance the customer leaves, both of which grow with payment size.
+  false_decline_cost: 25.0
+  false_decline_amount_fraction: 0.02
+  # One manual review, whatever the outcome.
   review_cost: 5.0
   # Share of reviewed fraud that analysts stop; the rest is lost.
   review_fraud_catch_rate: 0.95
 
 policy:
   # Outcomes: p < review -> APPROVE; review <= p < decline -> REVIEW; p >= decline -> DECLINE.
-  # Thresholds are chosen on validation data to minimize expected cost,
-  # subject to the review queue holding at most this share of traffic.
+  # Thresholds minimize expected cost on validation data, subject to the review
+  # queue holding at most this share of traffic (analyst capacity).
   max_review_rate: 0.02
   threshold_grid_size: 300
+
+# Alternative cost assumptions re-evaluated by tune-policy, to show how much the
+# chosen thresholds and outcomes depend on each guess. Each entry overrides
+# cost_matrix fields.
+sensitivity:
+  - {name: baseline}
+  - {name: old_flat_decline_cost, false_decline_cost: 50.0, false_decline_amount_fraction: 0.0}
+  - {name: cheap_declines, false_decline_amount_fraction: 0.005}
+  - {name: costly_declines, false_decline_amount_fraction: 0.05}
+  - {name: costly_reviews, review_cost: 20.0}
+  - {name: weaker_reviewers, review_fraud_catch_rate: 0.8}

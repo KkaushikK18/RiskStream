@@ -71,6 +71,23 @@ def cmd_train(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_tune_policy(args: argparse.Namespace) -> int:
+    from pathlib import Path
+
+    from riskstream.config import PROJECT_ROOT
+    from riskstream.training.policy import run_policy_tuning
+
+    if args.bundle:
+        bundle = Path(args.bundle)
+    else:
+        candidates = sorted((PROJECT_ROOT / "models" / "candidates").glob(f"*-{args.dataset}-*"))
+        if not candidates:
+            raise FileNotFoundError(f"No candidate bundle for {args.dataset}; run `train` first")
+        bundle = candidates[-1]
+    print(json.dumps(run_policy_tuning(args.dataset, bundle), indent=2))
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     p = argparse.ArgumentParser(prog="riskstream")
     sub = p.add_subparsers(dest="command", required=True)
@@ -96,6 +113,11 @@ def build_parser() -> argparse.ArgumentParser:
     t.add_argument("--n-trials", type=int, help="Override tuning trials per model")
     t.add_argument("--run-name", help="MLflow parent run name")
     t.set_defaults(func=cmd_train)
+
+    pol = sub.add_parser("tune-policy", help="Choose decision thresholds for a saved model (no retraining)")
+    pol.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    pol.add_argument("--bundle", help="Model bundle directory (default: newest candidate for the dataset)")
+    pol.set_defaults(func=cmd_tune_policy)
     return p
 
 

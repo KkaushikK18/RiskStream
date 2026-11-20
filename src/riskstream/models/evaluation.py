@@ -9,7 +9,6 @@ from sklearn.metrics import average_precision_score, brier_score_loss, roc_auc_s
 
 from riskstream.config import load_config
 
-
 # ----------------------------------------------------------------- ranking metrics
 
 
@@ -95,16 +94,22 @@ def calibration_metrics(y: np.ndarray, p: np.ndarray, n_bins: int) -> dict:
 class CostMatrix:
     fraud_loss_fixed: float
     fraud_loss_amount_fraction: float
-    false_decline_cost: float
+    false_decline_cost: float  # fixed part of declining a legitimate payment
     review_cost: float
     review_fraud_catch_rate: float
+    # Share of the amount lost when a legitimate payment is declined
+    # (lost fees, customer churn). Zero reproduces the old flat-cost model.
+    false_decline_amount_fraction: float = 0.0
 
     @classmethod
-    def from_config(cls) -> CostMatrix:
-        return cls(**load_config("thresholds")["cost_matrix"])
+    def from_config(cls, overrides: dict | None = None) -> CostMatrix:
+        return cls(**(load_config("thresholds")["cost_matrix"] | (overrides or {})))
 
     def fraud_loss(self, amount: np.ndarray) -> np.ndarray:
         return self.fraud_loss_fixed + self.fraud_loss_amount_fraction * amount
+
+    def false_decline_loss(self, amount: np.ndarray) -> np.ndarray:
+        return self.false_decline_cost + self.false_decline_amount_fraction * amount
 
 
 @dataclass(frozen=True)
@@ -125,7 +130,7 @@ def policy_cost(y: np.ndarray, p: np.ndarray, amount: np.ndarray, th: DecisionTh
     approved_fraud = float(loss[(d == 0) & fraud].sum())
     reviewed_fraud_loss = float((1 - cm.review_fraud_catch_rate) * loss[(d == 1) & fraud].sum())
     review = float(cm.review_cost * (d == 1).sum())
-    declines = float(cm.false_decline_cost * ((d == 2) & ~fraud).sum())
+    declines = float(cm.false_decline_loss(amount)[(d == 2) & ~fraud].sum())
     total = approved_fraud + reviewed_fraud_loss + review + declines
     no_model = float(loss[fraud].sum())  # approve everything
     return {
@@ -155,9 +160,11 @@ def optimize_thresholds(y: np.ndarray, p: np.ndarray, amount: np.ndarray, cm: Co
     """
     order = np.argsort(-p, kind="stable")
     ps, ys, loss = p[order], y[order].astype(float), cm.fraud_loss(amount[order])
+    decline_loss = cm.false_decline_loss(amount[order])
     n = len(ps)
     z = np.zeros(1)
-    c_legit = np.concatenate([z, np.cumsum(1 - ys)])
+    # cumulative cost of declining every legitimate row in the prefix
+    c_legit = np.concatenate([z, np.cumsum((1 - ys) * decline_loss)])
     c_loss = np.concatenate([z, np.cumsum(loss * ys)])
     total_loss = c_loss[-1]
 
@@ -170,7 +177,7 @@ def optimize_thresholds(y: np.ndarray, p: np.ndarray, amount: np.ndarray, cm: Co
     D = k[None, :]  # decline threshold -> prefix length d
     valid = (cand[None, :] >= cand[:, None]) & ((R - D) / n <= max_review_rate)
     cost = (
-        c_legit[D] * cm.false_decline_cost
+        c_legit[D]
         + (R - D) * cm.review_cost
         + (1 - cm.review_fraud_catch_rate) * (c_loss[R] - c_loss[D])
         + (total_loss - c_loss[R])
