@@ -45,5 +45,11 @@ DEPENDENCY_ERRORS = Counter("riskstream_dependency_errors_total", "Failed calls 
 DB_POOL_IN_USE = Gauge("riskstream_db_pool_checked_out", "Database connections currently checked out")
 DB_POOL_SIZE = Gauge("riskstream_db_pool_size", "Configured database pool size (excluding overflow)")
 MODEL_LOADED = Gauge("riskstream_model_loaded", "1 when a valid model and policy are loaded")
+FEATURE_SOURCE = Counter("riskstream_feature_source_total", "Feature primitives served per source",
+                         ["source"])  # redis | postgres | postgres_fallback
+FEATURE_FALLBACKS = Counter("riskstream_feature_fallbacks_total",
+                            "Requests that could not use Redis features, by reason", ["reason"])
+FEATURE_STORE_SECONDS = Histogram("riskstream_feature_store_read_seconds", "Redis feature read (one round trip)",
+                                  buckets=STAGE_BUCKETS)
 MODEL_INFO = Gauge("riskstream_model_info", "Loaded model and policy versions (value is always 1)",
                    ["model_version", "policy_version", "feature_version"])

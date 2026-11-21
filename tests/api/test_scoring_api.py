@@ -120,10 +120,10 @@ def test_same_id_different_content_conflicts(client, db_url):
 
 def test_concurrent_duplicate_returns_stored_result(client, db_url, monkeypatch):
     """Another request commits the same transaction between our check and our insert."""
-    import riskstream.inference.predictor as predictor
+    import riskstream.inference.feature_source as feature_source
 
     service = client.app.state.service
-    real = predictor.history_primitives
+    real = feature_source.history_primitives
     calls = {"n": 0}
 
     def racing(*args, **kwargs):
@@ -134,7 +134,7 @@ def test_concurrent_duplicate_returns_stored_result(client, db_url, monkeypatch)
             service.score(ScoreRequest(**txn()), "other-instance")  # wins the race
         return real(*args, **kwargs)
 
-    monkeypatch.setattr(predictor, "history_primitives", racing)
+    monkeypatch.setattr(feature_source, "history_primitives", racing)
     r = client.post("/v1/score", json=txn(), headers=auth())
     assert r.status_code == 200 and r.json()["idempotent_replay"] is True
     assert count(db_url, TransactionRow) == 1 and count(db_url, PredictionRow) == 1
@@ -202,12 +202,12 @@ def test_history_feeds_later_features_with_offline_semantics(client, db_url, tmp
 
 
 def test_database_failure_fails_closed(client, db_url, monkeypatch):
-    import riskstream.inference.predictor as predictor
+    import riskstream.inference.feature_source as feature_source
 
     def down(*a, **k):
         raise OperationalError("SELECT", {}, Exception("server closed the connection"))
 
-    monkeypatch.setattr(predictor, "history_primitives", down)
+    monkeypatch.setattr(feature_source, "history_primitives", down)
     r = client.post("/v1/score", json=txn(), headers=auth())
     assert r.status_code == 503
     assert r.json()["error"]["code"] == "dependency_unavailable"

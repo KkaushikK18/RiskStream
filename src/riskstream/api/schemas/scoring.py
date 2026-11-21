@@ -71,6 +71,8 @@ class ScoreResponse(StrictModel):
     feature_version: str
     scored_at: datetime
     idempotent_replay: bool = Field(description="True when this is a stored result for a repeated request")
+    feature_source: Literal["redis", "postgres", "postgres_fallback"] = Field(
+        description="Where behavioral feature inputs came from")
     latency: Latency
 
 

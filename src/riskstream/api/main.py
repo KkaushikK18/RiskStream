@@ -28,8 +28,10 @@ from riskstream.api.middleware import (
 )
 from riskstream.api.routes import health, labels, scoring, transactions
 from riskstream.api.security import ApiKeyAuthenticator, RateLimiter
-from riskstream.config import AppConfig, Settings, get_settings
+from riskstream.config import AppConfig, Settings, StreamingConfig, get_settings
+from riskstream.features.online_store import RedisFeatureStore
 from riskstream.features.registry import get_registry
+from riskstream.inference.feature_source import FeatureProvider
 from riskstream.inference.model_loader import LoadedModel, ModelLoadError, load_serving_model
 from riskstream.inference.predictor import ScoringService
 from riskstream.logging_config import get_logger, setup_logging
@@ -80,11 +82,23 @@ def _record_deployment(app: FastAPI) -> None:
         logger.warning("Could not record deployment (%s); database unavailable at startup", type(exc).__name__)
 
 
+def _feature_provider(app: FastAPI) -> FeatureProvider:
+    state = app.state
+    windows = state.registry.config.windows
+    mode = state.stream_cfg.serving_feature_source
+    if state.feature_store is None and mode == "redis" and state.settings.redis_url:
+        state.feature_store = RedisFeatureStore.from_url(state.settings.redis_url, state.stream_cfg, windows,
+                                                         request_path=True)
+    if mode == "redis" and state.feature_store is None:
+        logger.warning("serving.feature_source=redis but REDIS_URL is not set; using PostgreSQL features")
+    return FeatureProvider(windows, mode, state.feature_store)
+
+
 def _wire(app: FastAPI) -> None:
     state = app.state
     if state.sessions is not None and state.model is not None:
         state.service = ScoringService(state.sessions, state.model, state.registry, state.cfg,
-                                       state.settings.instance_id)
+                                       state.settings.instance_id, _feature_provider(app))
         state.unavailable_reason = None
     else:
         state.service = None
@@ -92,9 +106,11 @@ def _wire(app: FastAPI) -> None:
 
 
 def create_app(settings: Settings | None = None, cfg: AppConfig | None = None, *,
-               engine: Engine | None = None, model: LoadedModel | None = None) -> FastAPI:
+               engine: Engine | None = None, model: LoadedModel | None = None,
+               stream_cfg: StreamingConfig | None = None, feature_store: RedisFeatureStore | None = None) -> FastAPI:
     settings = settings or get_settings()
     cfg = cfg or AppConfig.load()
+    stream_cfg = stream_cfg or StreamingConfig.load()
 
     @asynccontextmanager
     async def lifespan(app: FastAPI):
@@ -119,6 +135,7 @@ def create_app(settings: Settings | None = None, cfg: AppConfig | None = None, *
                                 {"name": "operations"}])
     state: Any = app.state
     state.settings, state.cfg, state.registry = settings, cfg, get_registry()
+    state.stream_cfg, state.feature_store = stream_cfg, feature_store
     state.engine, state.owns_engine, state.sessions = engine, False, None
     state.model, state.model_error = model, None if model else "model not loaded yet"
     state.service, state.unavailable_reason = None, "starting"

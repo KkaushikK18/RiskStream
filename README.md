@@ -5,9 +5,10 @@ machine learning. The goal is the full lifecycle of a production ML system:
 data pipeline, point-in-time features, model development, serving,
 streaming, monitoring, retraining and safe deployment.
 
-**Status:** Phases 0-3 are implemented and verified locally: data pipeline,
-feature engineering, model experimentation, and a scoring API on PostgreSQL
-(see [Scoring API](#scoring-api-phase-3)). Streaming, monitoring and
+**Status:** Phases 0-4 are implemented and verified locally: data pipeline,
+feature engineering, model experimentation, a scoring API on PostgreSQL, and
+event streaming with a Redis online feature store (see
+[docs/streaming.md](docs/streaming.md)). Monitoring dashboards, retraining and
 deployment are not built yet; see [Roadmap](#roadmap).
 
 > Data note: PaySim is a simulation of mobile-money transactions, and the
@@ -286,7 +287,7 @@ data/, reports/, models/, mlruns/   generated (git-ignored)
 | 1 | config, logging, synthetic data, ingestion, validation, EDA, split | done |
 | 2 | features, six model families + anomaly detector, tuning, calibration, thresholds, MLflow, artifacts | done |
 | 3 | FastAPI inference service, PostgreSQL, decision policy | done |
-| 4 | Redis online features, Redpanda streaming, replay | pending |
+| 4 | Redis online features, Redpanda streaming, outbox relay, replay, DLQ | done ([docs/streaming.md](docs/streaming.md)) |
 | 5 | Docker Compose environment | pending |
 | 6 | Prometheus, Grafana, alerting | pending |
 | 7 | drift, delayed labels, retraining with Prefect, champion/challenger | pending |

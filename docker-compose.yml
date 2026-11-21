@@ -1,7 +1,7 @@
-# Local infrastructure. Phase 3 needs only PostgreSQL; Phase 5 adds the API,
-# Redis, Redpanda, MLflow, Prometheus and Grafana.
+# Local infrastructure: PostgreSQL (Phase 3), Redis and Redpanda (Phase 4).
+# Phase 5 adds the API and workers as containers, MLflow, Prometheus and Grafana.
 #
-#   docker compose up -d postgres
+#   docker compose up -d postgres redis redpanda
 #   docker compose ps          # wait for "healthy"
 #   docker compose down        # stop (data kept in the volume)
 #   docker compose down -v     # stop and DELETE the database volume
@@ -44,5 +44,78 @@ services:
           memory: 768m
     restart: unless-stopped
 
+  # Online feature store. No persistence: the store is rebuilt from PostgreSQL
+  # (`online-bootstrap`). noeviction: when memory is full, writes fail loudly
+  # (the consumer blocks and alerts) instead of Redis silently dropping features.
+  redis:
+    image: redis:7.4-alpine
+    command:
+      - redis-server
+      - --requirepass
+      - ${REDIS_PASSWORD:?set REDIS_PASSWORD in .env}
+      - --maxmemory
+      - 640mb
+      - --maxmemory-policy
+      - noeviction
+      - --save
+      - ""
+      - --appendonly
+      - "no"
+      - --hash-max-listpack-entries
+      - "512"
+      - --hash-max-listpack-value
+      - "64"
+    ports:
+      - "127.0.0.1:6379:6379"
+    healthcheck:
+      test: ["CMD-SHELL", "redis-cli -a \"$${REDIS_PASSWORD}\" --no-auth-warning ping | grep PONG"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    environment:
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    restart: unless-stopped
+
+  # Kafka-compatible broker, single node, dev mode (no fsync per write).
+  # Internal listener redpanda:9092 for containers (Phase 5), external 127.0.0.1:19092 for the host.
+  redpanda:
+    image: docker.redpanda.com/redpandadata/redpanda:v24.2.20
+    command:
+      - redpanda
+      - start
+      - --mode
+      - dev-container
+      - --smp
+      - "1"
+      - --memory
+      - 512M
+      - --reserve-memory
+      - 0M
+      - --overprovisioned
+      - --kafka-addr
+      - internal://0.0.0.0:9092,external://0.0.0.0:19092
+      - --advertise-kafka-addr
+      - internal://redpanda:9092,external://127.0.0.1:19092
+    ports:
+      - "127.0.0.1:19092:19092"
+      - "127.0.0.1:9644:9644"   # admin API / broker metrics
+    volumes:
+      - redpanda:/var/lib/redpanda/data
+    healthcheck:
+      test: ["CMD-SHELL", "rpk cluster health | grep -E 'Healthy:.+true'"]
+      interval: 5s
+      timeout: 5s
+      retries: 30
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    restart: unless-stopped
+
 volumes:
   pgdata:
+  redpanda:

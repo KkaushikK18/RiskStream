@@ -8,7 +8,7 @@ from sqlalchemy import create_engine
 
 from riskstream.api.main import create_app
 from riskstream.api.security import hash_key
-from riskstream.config import ApiKeyEntry, AppConfig, Settings
+from riskstream.config import ApiKeyEntry, AppConfig, Settings, StreamingConfig
 from riskstream.storage.admin import upgrade
 from tests.conftest import DECLINE_T, EPOCH, MODEL_VERSION, REVIEW_T, ts, txn
 
@@ -40,11 +40,13 @@ def db_url(tmp_path):
 def make_client(artifacts, db_url):
     clients = []
 
-    def _make(cfg_overrides: dict | None = None, **settings_overrides):
+    def _make(cfg_overrides: dict | None = None, *, stream_cfg=None, feature_store=None, **settings_overrides):
         settings = make_settings(artifacts, db_url, **settings_overrides)
         cfg = AppConfig.load(**(cfg_overrides or {}))
         engine = create_engine(db_url, connect_args={"check_same_thread": False})
-        app = create_app(settings, cfg, engine=engine)
+        # Phase 3 tests use PostgreSQL features unless a test opts into Redis.
+        stream_cfg = stream_cfg or StreamingConfig.load(serving_feature_source="postgres")
+        app = create_app(settings, cfg, engine=engine, stream_cfg=stream_cfg, feature_store=feature_store)
         client = TestClient(app, raise_server_exceptions=False)
         client.__enter__()
         clients.append((client, engine))

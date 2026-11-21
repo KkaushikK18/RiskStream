@@ -1,9 +1,12 @@
 from __future__ import annotations
 
+import time
+
 from fastapi import APIRouter, Request, Response
 from prometheus_client import CONTENT_TYPE_LATEST, generate_latest
 
 from riskstream.api.schemas.health import DependencyStatus, LivenessResponse, ReadinessResponse
+from riskstream.features.online_store import FeatureStoreError, assess_freshness
 from riskstream.monitoring import metrics
 from riskstream.storage.database import DATABASE_ERRORS, ping
 
@@ -41,6 +44,28 @@ def ready(request: Request, response: Response) -> ReadinessResponse:
         except DATABASE_ERRORS as exc:
             metrics.DEPENDENCY_ERRORS.labels("database").inc()
             deps.append(DependencyStatus(name="database", essential=True, status="down", detail=type(exc).__name__))
+
+    # Optional: Redis online features. If unusable, scoring falls back to PostgreSQL
+    # (slower, same semantics), so the service is degraded, not unready.
+    store = state.feature_store
+    if state.stream_cfg.serving_feature_source == "redis":
+        if store is None:
+            deps.append(DependencyStatus(name="online_features", essential=False, status="degraded",
+                                         detail="REDIS_URL not set; serving PostgreSQL features"))
+        else:
+            t = time.perf_counter()
+            try:
+                fresh = assess_freshness(store.read_meta(), state.stream_cfg)
+                latency = round((time.perf_counter() - t) * 1000, 2)
+                deps.append(DependencyStatus(
+                    name="online_features", essential=False, status="ok" if fresh.usable else "degraded",
+                    detail=None if fresh.usable else f"falling back to PostgreSQL: {fresh.reason} {fresh.detail}".strip(),
+                    latency_ms=latency))
+            except FeatureStoreError as exc:
+                metrics.DEPENDENCY_ERRORS.labels("redis").inc()
+                deps.append(DependencyStatus(name="online_features", essential=False, status="down",
+                                             detail=f"Redis unavailable ({type(exc.__cause__).__name__}); "
+                                                    "falling back to PostgreSQL"))
 
     if any(d.essential and d.status != "ok" for d in deps):
         status = "not_ready"

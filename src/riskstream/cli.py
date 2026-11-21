@@ -261,6 +261,10 @@ def build_parser() -> argparse.ArgumentParser:
     hs = sub.add_parser("history-status", help="Latest stored step and any gaps versus the dataset")
     hs.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
     hs.set_defaults(func=cmd_history_status)
+
+    from riskstream.streaming.cli_commands import register as register_streaming
+
+    register_streaming(sub)
     return p
 
 

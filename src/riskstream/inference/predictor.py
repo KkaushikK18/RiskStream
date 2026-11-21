@@ -12,10 +12,12 @@ Score flow for one request:
    If a concurrent identical request committed first (unique-key race), its
    stored result is returned.
 
-Consistency: a scored transaction is visible to feature queries as soon as
-step 5 commits. Because features only use earlier hours, two transactions in
-the same hour never affect each other, so concurrent requests for one entity
-need no locking.
+Consistency: with PostgreSQL features, a scored transaction is visible to
+later feature reads as soon as step 5 commits. With Redis features (Phase 4)
+it becomes visible after the relay and feature consumer have processed its
+event (eventual consistency; see inference/feature_source.py and
+docs/streaming.md). Features only use earlier hours, so two transactions in
+the same hour never affect each other and need no locking.
 """
 
 from __future__ import annotations
@@ -35,6 +37,7 @@ from riskstream.api.schemas.scoring import LabelRequest, ScoreRequest
 from riskstream.config import AppConfig
 from riskstream.features.online import features_from_primitives
 from riskstream.features.registry import FeatureRegistry
+from riskstream.inference.feature_source import FeatureProvider
 from riskstream.inference.model_loader import LoadedModel
 from riskstream.logging_config import get_logger
 from riskstream.monitoring import metrics
@@ -47,7 +50,6 @@ from riskstream.storage.repositories.events import (
     add_audit_event,
     add_outbox_event,
 )
-from riskstream.storage.repositories.feature_history import history_primitives
 
 logger = get_logger(__name__)
 
@@ -93,6 +95,7 @@ class ScoreResult:
     feature_ms: float
     inference_ms: float
     total_ms: float
+    feature_source: str = "postgres"
 
 
 @dataclass
@@ -103,10 +106,11 @@ class LabelResult:
 
 class ScoringService:
     def __init__(self, sessions: sessionmaker[Session], model: LoadedModel, registry: FeatureRegistry,
-                 cfg: AppConfig, instance_id: str) -> None:
+                 cfg: AppConfig, instance_id: str, features: FeatureProvider | None = None) -> None:
         self.sessions, self.model, self.registry = sessions, model, registry
         self.cfg, self.instance_id = cfg, instance_id
         self.windows = registry.config.windows
+        self.features = features or FeatureProvider(self.windows, "postgres")
 
     # ------------------------------------------------------------------ score
 
@@ -116,6 +120,7 @@ class ScoringService:
             pred.transaction_id, pred.fraud_probability, pred.risk_level, pred.decision, pred.model_version,
             pred.policy_version, pred.feature_version, utc(pred.scored_at), True,
             pred.feature_latency_ms, pred.inference_latency_ms, (time.perf_counter() - start) * 1000,
+            pred.feature_source,
         )
 
     def _existing(self, session: Session, transaction_id: str, digest: str, start: float) -> ScoreResult | None:
@@ -148,7 +153,8 @@ class ScoringService:
             metrics.SCORE_STAGE.labels("idempotency_check").observe(time.perf_counter() - t0)
 
             t1 = time.perf_counter()
-            prims = history_primitives(session, req.dest_account_id, req.orig_account_id, step, self.windows)
+            source = self.features.primitives(session, req.dest_account_id, req.orig_account_id, step)
+            prims = source.primitives
             t_hist = time.perf_counter()
             features = features_from_primitives(txn, prims, self.model.feature_names, self.windows)
             t2 = time.perf_counter()
@@ -163,7 +169,7 @@ class ScoringService:
             t4 = time.perf_counter()
             try:
                 self._persist(session, req, digest, step, probability, decision, features, feature_ms,
-                              inference_ms, scored_at)
+                              inference_ms, scored_at, source.source, source.fallback_reason)
             except IntegrityError:
                 # A concurrent request with the same transaction_id committed first.
                 session.rollback()
@@ -179,14 +185,16 @@ class ScoringService:
         logger.info("scored %s -> %s", req.transaction_id, decision.decision,
                     extra={"event": "transaction_scored", "transaction_id": req.transaction_id,
                            "decision": decision.decision, "model_version": self.model.model_version,
+                           "feature_source": source.source, "fallback_reason": source.fallback_reason,
                            "feature_ms": round(feature_ms, 2), "inference_ms": round(inference_ms, 2)})
         return ScoreResult(req.transaction_id, probability, decision.risk_level, decision.decision,
                            self.model.model_version, self.model.policy.policy_version, self.model.feature_version,
-                           scored_at, False, feature_ms, inference_ms, total_ms)
+                           scored_at, False, feature_ms, inference_ms, total_ms, source.source)
 
     def _persist(self, session: Session, req: ScoreRequest, digest: str, step: int, probability: float,
                  decision, features: dict[str, float], feature_ms: float, inference_ms: float,
-                 scored_at: datetime) -> None:
+                 scored_at: datetime, feature_source: str = "postgres",
+                 fallback_reason: str | None = None) -> None:
         """Transaction + prediction + outbox event in one database transaction."""
         session.add(TransactionRow(
             transaction_id=req.transaction_id, event_time=req.timestamp.astimezone(UTC), step=step,
@@ -200,7 +208,8 @@ class ScoringService:
             policy_version=self.model.policy.policy_version, feature_version=self.model.feature_version,
             fraud_probability=probability, risk_level=decision.risk_level, decision=decision.decision,
             features=_json_safe(features), feature_latency_ms=feature_ms, inference_latency_ms=inference_ms,
-            instance_id=self.instance_id, scored_at=scored_at,
+            instance_id=self.instance_id, scored_at=scored_at, feature_source=feature_source,
+            feature_fallback_reason=fallback_reason,
         ))
         add_outbox_event(session, TOPIC_SCORED, req.dest_account_id, {
             "transaction_id": req.transaction_id, "event_time": req.timestamp.astimezone(UTC).isoformat(),

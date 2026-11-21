@@ -106,6 +106,9 @@ class PredictionRow(Base):
     features: Mapped[dict[str, Any]] = mapped_column(JSONType)
     feature_latency_ms: Mapped[float] = mapped_column(Float)
     inference_latency_ms: Mapped[float] = mapped_column(Float)
+    # redis | postgres | postgres_fallback (Phase 4)
+    feature_source: Mapped[str] = mapped_column(String(24), server_default="postgres")
+    feature_fallback_reason: Mapped[str | None] = mapped_column(String(48), nullable=True)
     instance_id: Mapped[str] = mapped_column(String(128))
     scored_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
 
@@ -116,6 +119,8 @@ class PredictionRow(Base):
         CheckConstraint(
             "fraud_probability >= 0 AND fraud_probability <= 1", name="ck_predictions_probability_range"
         ),
+        CheckConstraint("feature_source IN ('postgres', 'redis', 'postgres_fallback')",
+                        name="ck_predictions_feature_source"),
         Index("ix_predictions_decision_id", "decision", "id"),
         Index("ix_predictions_scored_at", "scored_at"),
         Index("ix_predictions_model_version", "model_version"),

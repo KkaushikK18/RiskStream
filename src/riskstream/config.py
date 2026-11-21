@@ -68,6 +68,13 @@ class Settings(BaseSettings):
     api_keys: list[ApiKeyEntry] = Field(default_factory=list)
     instance_id: str = Field(default_factory=_default_instance_id)
 
+    # Streaming and online features (Phase 4)
+    redis_url: str | None = None
+    kafka_bootstrap_servers: str | None = None
+    # Key used by the scoring worker to call the API (a key with the scorer role).
+    worker_api_key: str | None = None
+    api_base_url: str = "http://127.0.0.1:8000"
+
     @property
     def admin_database_url(self) -> str | None:
         return self.migration_database_url or self.database_url
@@ -155,6 +162,76 @@ class AppConfig:
             require_approved_policy=bool(c["model"]["require_approved_policy"]),
         )
         values.update(overrides)
+        return cls(**values)
+
+
+@dataclass(frozen=True)
+class StreamingConfig:
+    """``configs/streaming.yaml`` as typed values."""
+
+    topic_ingested: str
+    topic_scored: str
+    topic_labeled: str
+    topic_dlq: str
+    partitions: int
+    replication_factor: int
+    retention_ms: int
+    producer: dict[str, Any]
+    max_attempts: int
+    backoff_initial_s: float
+    backoff_max_s: float
+    pause_on_failure_s: float
+    heartbeat_interval_s: float
+    lag_report_interval_s: float
+    session_timeout_ms: int
+    max_poll_interval_ms: int
+    relay_batch_size: int
+    relay_poll_interval_s: float
+    relay_max_attempts_before_alert: int
+    namespace: str
+    stat_buckets: int
+    dedupe_ttl_s: int
+    window_key_ttl_s: int
+    redis_socket_timeout_s: float
+    redis_connect_timeout_s: float
+    heartbeat_timeout_s: float
+    max_pipeline_delay_s: float
+    max_consumer_lag_messages: int
+    max_consumer_stall_s: float
+    serving_feature_source: str
+    replay_rate_per_second: float
+    replay_barrier_timeout_s: float
+
+    @classmethod
+    def load(cls, **overrides: Any) -> StreamingConfig:
+        c = load_config("streaming")
+        t, con, rel, st, fr = c["topics"], c["consumer"], c["relay"], c["online_store"], c["freshness"]
+        values = dict(
+            topic_ingested=t["ingested"], topic_scored=t["scored"], topic_labeled=t["labeled"], topic_dlq=t["dlq"],
+            partitions=int(t["partitions"]), replication_factor=int(t["replication_factor"]),
+            retention_ms=int(t["retention_ms"]), producer=dict(c["producer"]),
+            max_attempts=int(con["max_attempts"]), backoff_initial_s=float(con["backoff_initial_s"]),
+            backoff_max_s=float(con["backoff_max_s"]), pause_on_failure_s=float(con["pause_on_failure_s"]),
+            heartbeat_interval_s=float(con["heartbeat_interval_s"]),
+            lag_report_interval_s=float(con["lag_report_interval_s"]),
+            session_timeout_ms=int(con["session_timeout_ms"]), max_poll_interval_ms=int(con["max_poll_interval_ms"]),
+            relay_batch_size=int(rel["batch_size"]), relay_poll_interval_s=float(rel["poll_interval_s"]),
+            relay_max_attempts_before_alert=int(rel["max_attempts_before_alert"]),
+            namespace=str(st["namespace"]), stat_buckets=int(st["stat_buckets"]),
+            dedupe_ttl_s=int(st["dedupe_ttl_s"]), window_key_ttl_s=int(st["window_key_ttl_s"]),
+            redis_socket_timeout_s=float(st["socket_timeout_s"]),
+            redis_connect_timeout_s=float(st["socket_connect_timeout_s"]),
+            heartbeat_timeout_s=float(fr["heartbeat_timeout_s"]),
+            max_pipeline_delay_s=float(fr["max_pipeline_delay_s"]),
+            max_consumer_lag_messages=int(fr["max_consumer_lag_messages"]),
+            max_consumer_stall_s=float(fr["max_consumer_stall_s"]),
+            serving_feature_source=str(c["serving"]["feature_source"]),
+            replay_rate_per_second=float(c["replay"]["rate_per_second"]),
+            replay_barrier_timeout_s=float(c["replay"]["barrier_timeout_s"]),
+        )
+        values.update(overrides)
+        if values["serving_feature_source"] not in ("postgres", "redis"):
+            raise ValueError("serving.feature_source must be 'postgres' or 'redis'")
         return cls(**values)
 
 

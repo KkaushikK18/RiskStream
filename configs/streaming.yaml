@@ -1,0 +1,71 @@
+# Streaming and online feature store configuration (Phase 4).
+# Broker and Redis addresses come from the environment (KAFKA_BOOTSTRAP_SERVERS, REDIS_URL).
+
+topics:
+  ingested: transactions.ingested    # replay / producers -> scoring worker
+  scored: transactions.scored        # outbox relay -> feature consumer (and later monitoring)
+  labeled: transactions.labeled      # outbox relay -> later delayed-label monitoring
+  dlq: transactions.dlq              # messages that can never be processed
+  partitions: 6
+  replication_factor: 1              # single local broker
+  retention_ms: 604800000            # 7 days
+
+producer:
+  # Idempotent producer: broker drops duplicates caused by producer retries.
+  acks: all
+  enable_idempotence: true
+  linger_ms: 5
+  delivery_timeout_ms: 30000
+
+consumer:
+  session_timeout_ms: 30000
+  max_poll_interval_ms: 300000
+  # Processing retries for transient errors (Redis/API down), per message.
+  max_attempts: 5
+  backoff_initial_s: 0.2
+  backoff_max_s: 10.0
+  # After max_attempts on a transient error the consumer does NOT skip the
+  # message: it rewinds to it, waits pause_on_failure_s and tries again, so
+  # nothing is lost (backpressure). Only permanent errors go to the DLQ.
+  pause_on_failure_s: 5.0
+  heartbeat_interval_s: 2.0
+  lag_report_interval_s: 5.0
+
+relay:
+  batch_size: 500
+  poll_interval_s: 0.2
+  max_attempts_before_alert: 10
+
+online_store:
+  # Key namespace includes the layout version; changing the layout means a new
+  # namespace and a re-bootstrap, never in-place mutation.
+  namespace: "rs:v1"
+  # Lifetime per-account stats are packed into this many small hashes
+  # (listpack-encoded by Redis) instead of one key per account.
+  stat_buckets: 32768
+  # Event-id dedup keys: redelivered events within this time are ignored.
+  dedupe_ttl_s: 604800
+  # Wall-clock safety TTL for per-account window hashes. Logical expiry is by
+  # simulated step (buckets older than the longest window are pruned on write).
+  window_key_ttl_s: 3024000          # 35 days
+  # Redis calls on the request path fail fast and fall back to PostgreSQL.
+  socket_timeout_s: 0.05
+  socket_connect_timeout_s: 0.2
+
+freshness:
+  # The API uses Redis features only while the pipeline is demonstrably live.
+  heartbeat_timeout_s: 15.0          # relay and consumer must have reported within this
+  max_pipeline_delay_s: 5.0          # oldest unpublished outbox event must be younger
+  max_consumer_lag_messages: 1000    # feature consumer lag on transactions.scored
+  # Measured by the relay from the broker: lag > 0 with no committed progress for
+  # this long means the consumer is dead or stuck, even if its last heartbeat is recent.
+  max_consumer_stall_s: 3.0
+
+serving:
+  # postgres: Phase 3 behaviour. redis: Redis with PostgreSQL fallback.
+  feature_source: redis
+
+replay:
+  # Default pacing when neither --rate nor --step-seconds is given.
+  rate_per_second: 200
+  barrier_timeout_s: 600

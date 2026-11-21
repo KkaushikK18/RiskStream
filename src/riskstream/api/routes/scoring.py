@@ -42,6 +42,7 @@ def score(req: ScoreRequest, response: Response, principal: Principal = Depends(
         transaction_id=r.transaction_id, fraud_probability=r.fraud_probability, risk_level=r.risk_level,
         decision=r.decision, model_version=r.model_version, policy_version=r.policy_version,
         feature_version=r.feature_version, scored_at=r.scored_at, idempotent_replay=r.idempotent_replay,
+        feature_source=r.feature_source,
         latency=Latency(feature_ms=round(r.feature_ms, 3), inference_ms=round(r.inference_ms, 3),
                         total_ms=round(r.total_ms, 3)),
     )
