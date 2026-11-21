@@ -1,0 +1,39 @@
+# Inference service configuration (non-secret, versioned).
+# Secrets and machine-specific values (DATABASE_URL, API_KEYS, model paths)
+# come from environment variables; see .env.example.
+
+api:
+  # Requests larger than this are rejected with 413 before parsing.
+  max_body_bytes: 16384
+  # Concurrent /v1/* requests per process. Beyond this the service sheds load
+  # with 503 instead of queueing without bound. Health and metrics are exempt.
+  max_inflight_requests: 64
+  # Worker threads for synchronous handlers (database + model work).
+  worker_threads: 16
+  rate_limit:
+    # Token bucket per API key, per process (approximate when replicated).
+    per_second: 200
+    burst: 400
+  pagination:
+    default_limit: 50
+    max_limit: 200
+
+database:
+  # pool_size + max_overflow should be >= worker_threads so a thread never
+  # waits for a connection longer than pool_timeout_seconds.
+  pool_size: 8
+  max_overflow: 8
+  pool_timeout_seconds: 2.0
+  statement_timeout_ms: 2000
+  lock_timeout_ms: 1000
+  connect_timeout_seconds: 3
+
+simulation:
+  # Maps request timestamps to PaySim steps: step = floor((t - epoch) / 1 h) + 1.
+  # Midnight UTC keeps hour_of_day equal to the UTC hour.
+  epoch: "2026-01-01T00:00:00Z"
+
+model:
+  # When true, the service refuses a decision policy whose approval status is
+  # not "approved". Development default is false; set true for production.
+  require_approved_policy: false

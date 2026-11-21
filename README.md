@@ -5,9 +5,10 @@ machine learning. The goal is the full lifecycle of a production ML system:
 data pipeline, point-in-time features, model development, serving,
 streaming, monitoring, retraining and safe deployment.
 
-**Status:** Phases 0-2 are implemented (data pipeline, feature engineering,
-model experimentation). Serving, streaming, monitoring and deployment are not
-built yet; see [Roadmap](#roadmap).
+**Status:** Phases 0-3 are implemented and verified locally: data pipeline,
+feature engineering, model experimentation, and a scoring API on PostgreSQL
+(see [Scoring API](#scoring-api-phase-3)). Streaming, monitoring and
+deployment are not built yet; see [Roadmap](#roadmap).
 
 > Data note: PaySim is a simulation of mobile-money transactions, and the
 > project's synthetic generator is simpler still. No result here describes
@@ -18,6 +19,7 @@ built yet; see [Roadmap](#roadmap).
 - [What exists today](#what-exists-today)
 - [Setup](#setup)
 - [Running the pipeline](#running-the-pipeline)
+- [Scoring API (Phase 3)](#scoring-api-phase-3)
 - [Datasets](#datasets)
 - [Methodology](#methodology)
 - [Results](#results)
@@ -112,6 +114,63 @@ Outputs:
 | `data/processed/<ds>/features/v1.0.0/` | feature tables, `feature_schema.json`, `feature_manifest.json` |
 | `reports/model_evaluation/<run>/` | `report.md`, `results.json`, PR, calibration and importance plots |
 | `models/candidates/<run>-<model>/` | model bundle |
+
+## Scoring API (Phase 3)
+
+FastAPI service that loads one explicit model bundle and decision policy at
+startup. For each transaction it reads the account's history from PostgreSQL
+and computes features with the same code as training. It returns
+APPROVE/REVIEW/DECLINE and stores the transaction, prediction and an outbox
+event in one database transaction. Endpoint reference: [docs/api.md](docs/api.md).
+Design decisions: [ADR 0007](docs/decisions/0007-inference-service-design.md).
+
+```powershell
+# 1. PostgreSQL on localhost:5433 (fill the three passwords in .env first)
+docker compose up -d postgres
+
+# 2. schema, and history so behavioral features match training conditions
+python -m riskstream.cli db-upgrade
+python -m riskstream.cli seed-history --dataset paysim --until-step 595
+
+# 3. an API key, and the model + policy to serve (set MODEL_BUNDLE_PATH, POLICY_PATH, API_KEYS in .env)
+python -m riskstream.cli create-api-key --name demo --roles scorer,reader,labeler
+
+# 4. run
+python -m riskstream.cli serve          # http://127.0.0.1:8000/docs
+```
+
+Check that served features match the offline pipeline on real PaySim rows
+(needs history seeded through `start-step - 1`), then run the HTTP walkthrough
+against the running server:
+
+```powershell
+python -m riskstream.cli check-serving-parity --dataset paysim --start-step 596 --steps 2
+python scripts/demo_api.py
+```
+
+Use `127.0.0.1`, not `localhost`, in database URLs on Windows: `localhost`
+tries IPv6 first and added about 5 s to every connection to the Docker
+PostgreSQL.
+
+### Measured locally (2026-11-21)
+
+Machine: Ryzen 5 3550H laptop, 5.9 GB RAM, Docker Desktop with 2.8 GB,
+PostgreSQL 16 container capped at 768 MB, one API process. These are
+single-client numbers, not load-test results (Phase 9).
+
+| check | result |
+|---|---|
+| tests (`pytest tests`, incl. 4 PostgreSQL integration tests) | 130 passed |
+| history backfill, steps 1-595 | 6,244,474 rows in 647 s; table 1.0 GB + indexes 0.8 GB |
+| serving parity, steps 596-597 | 11,805 transactions through the real scoring path; 401,370 feature values compared, 0 mismatches (max difference 1.5e-5, float32 rounding); probabilities and decisions identical for all rows |
+| per-request time, parity run (in process) | p50 31 ms, p95 39 ms, p99 49 ms. Stored breakdown: feature lookup + derivation p50 11.6 ms, model p50 1.6 ms; the rest is the idempotency check and the write transaction |
+| HTTP walkthrough, 199 sequential new requests | client-side p50 37 ms, p95 60 ms, p99 109 ms |
+
+`scripts/demo_api.py` scores test-period rows (step 670 and later), but the
+database only holds history through step 597. Those requests therefore see a
+gap of about 72 hours in each account's history. They exercise the API
+correctly, but their features are not the ones the model saw offline. The
+parity check above is the evidence for feature correctness.
 
 ## Datasets
 
@@ -222,7 +281,7 @@ data/, reports/, models/, mlruns/   generated (git-ignored)
 | 0 | workspace inspection, plan | done |
 | 1 | config, logging, synthetic data, ingestion, validation, EDA, split | done |
 | 2 | features, six model families + anomaly detector, tuning, calibration, thresholds, MLflow, artifacts | done |
-| 3 | FastAPI inference service, PostgreSQL, decision policy | next |
+| 3 | FastAPI inference service, PostgreSQL, decision policy | done |
 | 4 | Redis online features, Redpanda streaming, replay | pending |
 | 5 | Docker Compose environment | pending |
 | 6 | Prometheus, Grafana, alerting | pending |

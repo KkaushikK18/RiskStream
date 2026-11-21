@@ -1,4 +1,10 @@
-"""Logging setup: human-readable text by default, JSON lines on request."""
+"""Logging setup: human-readable text by default, JSON lines on request.
+
+Every record from the ``riskstream`` loggers carries ``request_id`` and
+``correlation_id`` (``-`` outside a request). Request payloads, amounts and
+account ids are never logged by the service; ``RedactingFilter`` additionally
+masks any field whose name looks sensitive if someone passes it via ``extra=``.
+"""
 
 from __future__ import annotations
 
@@ -11,6 +17,27 @@ from pathlib import Path
 from riskstream.config import PROJECT_ROOT, get_settings
 
 _RESERVED = set(logging.LogRecord("", 0, "", 0, "", (), None).__dict__) | {"message", "asctime"}
+SENSITIVE_KEYS = ("api_key", "authorization", "password", "secret", "token", "account_id", "orig_id",
+                  "dest_id", "balance", "amount", "database_url")
+
+
+class ContextFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        from riskstream.api.context import correlation_id_var, request_id_var
+
+        if not hasattr(record, "request_id"):
+            record.request_id = request_id_var.get() or "-"
+        if not hasattr(record, "correlation_id"):
+            record.correlation_id = correlation_id_var.get() or "-"
+        return True
+
+
+class RedactingFilter(logging.Filter):
+    def filter(self, record: logging.LogRecord) -> bool:
+        for key in list(record.__dict__):
+            if key not in _RESERVED and any(s in key.lower() for s in SENSITIVE_KEYS):
+                record.__dict__[key] = "[redacted]"
+        return True
 
 
 class JSONFormatter(logging.Formatter):
@@ -31,16 +58,12 @@ class JSONFormatter(logging.Formatter):
         return json.dumps(payload, default=str)
 
 
-_configured = False
-
-
 def setup_logging(
     log_level: str | None = None,
     log_format: str | None = None,
     log_file: Path | None = None,
 ) -> None:
     """Configure the ``riskstream`` logger. Safe to call more than once."""
-    global _configured
     settings = get_settings()
     level = (log_level or settings.log_level).upper()
     fmt = log_format or settings.log_format
@@ -52,28 +75,30 @@ def setup_logging(
         formatter = JSONFormatter()
     else:
         formatter = logging.Formatter(
-            "%(asctime)s %(levelname)-7s %(name)s - %(message)s", "%Y-%m-%d %H:%M:%S"
+            "%(asctime)s %(levelname)-7s %(name)s [%(request_id)s] - %(message)s", "%Y-%m-%d %H:%M:%S"
         )
 
-    console = logging.StreamHandler(sys.stdout)
-    console.setLevel(level)
-    console.setFormatter(formatter)
-    file_handler = logging.FileHandler(log_file, encoding="utf-8")
-    file_handler.setLevel(logging.DEBUG)
-    file_handler.setFormatter(formatter)
+    handlers: list[logging.Handler] = [logging.StreamHandler(sys.stdout),
+                                       logging.FileHandler(log_file, encoding="utf-8")]
+    handlers[0].setLevel(level)
+    handlers[1].setLevel(logging.DEBUG)
 
     logger = logging.getLogger("riskstream")
     for handler in list(logger.handlers):
         logger.removeHandler(handler)
         handler.close()
+    for handler in handlers:
+        handler.setFormatter(formatter)
+        handler.addFilter(ContextFilter())
+        handler.addFilter(RedactingFilter())
+        logger.addHandler(handler)
     logger.setLevel(logging.DEBUG)
-    logger.addHandler(console)
-    logger.addHandler(file_handler)
     logger.propagate = False
 
     for noisy in ("urllib3", "matplotlib", "mlflow", "alembic", "PIL"):
         logging.getLogger(noisy).setLevel(logging.WARNING)
-    _configured = True
+    # Our access log replaces uvicorn's, which would log full paths with ids.
+    logging.getLogger("uvicorn.access").disabled = True
 
 
 def get_logger(name: str) -> logging.Logger:

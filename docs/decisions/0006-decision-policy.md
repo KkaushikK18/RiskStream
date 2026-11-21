@@ -50,6 +50,8 @@ because its scores are almost all close to 0 or 1.
   have a lower DECLINE threshold.
 * Thresholds compare only the probability. The cheapest action also depends on
   the amount, so a per-payment expected-cost decision would be more precise.
-  That belongs in the Phase 3 decision policy.
+  Phase 3 serves the validated threshold policy unchanged. An amount-aware
+  policy is deferred to Phase 8, where policy changes can be shadowed and
+  canaried before they decide real traffic.
 * The test set is reported for each new policy, but thresholds are never chosen
   on it. Costs must not be adjusted in response to test results.

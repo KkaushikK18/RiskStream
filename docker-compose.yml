@@ -1,0 +1,48 @@
+# Local infrastructure. Phase 3 needs only PostgreSQL; Phase 5 adds the API,
+# Redis, Redpanda, MLflow, Prometheus and Grafana.
+#
+#   docker compose up -d postgres
+#   docker compose ps          # wait for "healthy"
+#   docker compose down        # stop (data kept in the volume)
+#   docker compose down -v     # stop and DELETE the database volume
+#
+# Host port 5433 avoids clashing with a locally installed PostgreSQL on 5432.
+
+name: riskstream
+
+services:
+  postgres:
+    # 16 is used because it was already cached locally; the schema needs nothing newer.
+    image: postgres:${POSTGRES_IMAGE_TAG:-16-alpine}
+    environment:
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
+      RISKSTREAM_OWNER_PASSWORD: ${RISKSTREAM_OWNER_PASSWORD:?set RISKSTREAM_OWNER_PASSWORD in .env}
+      RISKSTREAM_APP_PASSWORD: ${RISKSTREAM_APP_PASSWORD:?set RISKSTREAM_APP_PASSWORD in .env}
+    command:
+      - postgres
+      - -c
+      - shared_buffers=128MB
+      - -c
+      - max_connections=100
+      - -c
+      - log_min_duration_statement=250
+    ports:
+      - "127.0.0.1:5433:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+      - ./infrastructure/postgres/roles.sql:/riskstream/roles.sql:ro
+      - ./infrastructure/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -d riskstream"]
+      interval: 5s
+      timeout: 3s
+      retries: 20
+    deploy:
+      resources:
+        limits:
+          memory: 768m
+    restart: unless-stopped
+
+volumes:
+  pgdata:

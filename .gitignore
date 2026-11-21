@@ -75,3 +75,5 @@ reports/load_testing/
 # Temporary files
 *.tmp
 .cache/
+# Local secrets (API keys)
+/secrets/

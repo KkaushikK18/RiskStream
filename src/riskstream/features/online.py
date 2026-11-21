@@ -117,15 +117,30 @@ class EntityHistory:
                     e.cnt_before_oldest += e.cnt_by_step.pop(st)
 
 
-def online_features(history: EntityHistory, txn: dict, feature_names: list[str]) -> dict[str, float]:
-    """Features for one transaction from current history (call BEFORE ``update``)."""
-    prims = history.primitives(txn["dest_id"], txn["orig_id"], int(txn["step"]))
-    row = {k: txn[k] for k in ("step", "type", "amount", "dest_type", "orig_balance_before")} | prims
+TXN_FIELDS: tuple[str, ...] = ("step", "type", "amount", "dest_type", "orig_balance_before")
+
+
+def features_from_primitives(txn: dict, prims: dict, feature_names: list[str],
+                             windows: tuple[int, ...]) -> dict[str, float]:
+    """Apply the shared ``derive`` formulas to one transaction and its primitives.
+
+    Every online primitive source (in-memory history, PostgreSQL, Redis) ends
+    here, so no feature formula is implemented outside ``features.derive``.
+    """
+    missing = [c for c in primitive_columns(windows) if c not in prims]
+    if missing:
+        raise KeyError(f"Missing primitives: {missing}")
+    row = {k: txn[k] for k in TXN_FIELDS} | {c: prims[c] for c in primitive_columns(windows)}
     schema = {
         "step": pl.Int32, "type": pl.String, "amount": pl.Float64, "dest_type": pl.String,
         "orig_balance_before": pl.Float64,
-        **{c: (pl.Int32 if c.endswith("last_step") else pl.Float64) for c in primitive_columns(history.windows)},
+        **{c: (pl.Int32 if c.endswith("last_step") else pl.Float64) for c in primitive_columns(windows)},
     }
     df = pl.DataFrame([row], schema=schema)
-    out = derive_features(df, feature_names, history.windows)
-    return out.row(0, named=True)
+    return derive_features(df, feature_names, windows).row(0, named=True)
+
+
+def online_features(history: EntityHistory, txn: dict, feature_names: list[str]) -> dict[str, float]:
+    """Features for one transaction from current history (call BEFORE ``update``)."""
+    prims = history.primitives(txn["dest_id"], txn["orig_id"], int(txn["step"]))
+    return features_from_primitives(txn, prims, feature_names, history.windows)
