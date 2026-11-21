@@ -118,6 +118,82 @@ def _insert_generic(engine: Engine, frame: pl.DataFrame, chunk_rows: int) -> int
     return int(inserted)
 
 
+def latest_stored_step(engine_or_conn) -> int | None:
+    """Highest step in ``transactions`` (uses ix_transactions_step)."""
+    with _connect(engine_or_conn) as conn:
+        return conn.execute(text("SELECT max(step) FROM transactions")).scalar_one()
+
+
+def history_gaps(engine_or_conn, canonical: pl.LazyFrame, until_step: int) -> list[int]:
+    """Steps <= until_step whose stored row count differs from the dataset's.
+
+    An empty list means the database holds exactly the dataset's history up to
+    ``until_step``, which is what the training features assumed.
+    """
+    expected = dict(canonical.filter(pl.col("step") <= until_step).group_by("step").len()
+                    .collect().iter_rows())
+    with _connect(engine_or_conn) as conn:
+        stored = dict(conn.execute(text(
+            "SELECT step, count(*) FROM transactions WHERE step <= :s GROUP BY step"), {"s": until_step}).all())
+    return sorted(s for s in set(expected) | set(stored) if expected.get(s, 0) != stored.get(s, 0))
+
+
+class _connect:
+    """Accept an Engine (open and close a connection) or an existing Connection."""
+
+    def __init__(self, target) -> None:
+        self.target, self.conn = target, None
+
+    def __enter__(self):
+        if isinstance(self.target, Engine):
+            self.conn = self.target.connect()
+            return self.conn
+        return self.target
+
+    def __exit__(self, *exc) -> None:
+        if self.conn is not None:
+            self.conn.close()
+
+
+def delete_scored(engine: Engine, *, from_step: int, actor: str) -> dict:
+    """Delete API-scored transactions at step >= from_step, with their predictions,
+    labels and outbox events. Backfilled history is never touched.
+
+    Needs the owner role: the application role has no DELETE privilege by design.
+    Writes an ``admin_delete_scored`` audit event in the same transaction.
+    """
+    from sqlalchemy.orm import Session
+
+    from riskstream.storage.repositories.events import add_audit_event
+
+    ids_sql = "SELECT transaction_id FROM transactions WHERE source = 'api' AND step >= :s"
+    with engine.begin() as conn:
+        ids = [r[0] for r in conn.execute(text(ids_sql), {"s": from_step})]
+        counts = {"transactions": len(ids)}
+        if ids:
+            for table in ("predictions", "labels"):
+                counts[table] = conn.execute(text(
+                    f"DELETE FROM {table} WHERE transaction_id IN ({ids_sql})"), {"s": from_step}).rowcount
+            outbox = 0
+            for i in range(0, len(ids), 1000):
+                chunk = ids[i:i + 1000]
+                params = {f"i{n}": v for n, v in enumerate(chunk)}
+                placeholders = ", ".join(f":i{n}" for n in range(len(chunk)))
+                # payload->>'transaction_id' on PostgreSQL; json_extract on SQLite
+                key = ("payload->>'transaction_id'" if engine.dialect.name == "postgresql"
+                       else "json_extract(payload, '$.transaction_id')")
+                outbox += conn.execute(text(
+                    f"DELETE FROM outbox_events WHERE {key} IN ({placeholders})"), params).rowcount
+            counts["outbox_events"] = outbox
+            conn.execute(text("DELETE FROM transactions WHERE source = 'api' AND step >= :s"),
+                         {"s": from_step})
+        with Session(bind=conn) as s:
+            add_audit_event(s, "admin_delete_scored", actor, f"step>={from_step}", counts)
+            s.flush()
+    logger.info("Deleted scored rows from step %d: %s", from_step, counts)
+    return counts
+
+
 def admin_engine(url: str) -> Engine:
     return create_engine(url, pool_pre_ping=True)
 

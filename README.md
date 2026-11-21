@@ -139,14 +139,23 @@ python -m riskstream.cli create-api-key --name demo --roles scorer,reader,labele
 python -m riskstream.cli serve          # http://127.0.0.1:8000/docs
 ```
 
-Check that served features match the offline pipeline on real PaySim rows
-(needs history seeded through `start-step - 1`), then run the HTTP walkthrough
-against the running server:
+Verify and demo (both start at the hour after the stored history):
 
 ```powershell
-python -m riskstream.cli check-serving-parity --dataset paysim --start-step 596 --steps 2
-python scripts/demo_api.py
+python -m riskstream.cli history-status --dataset paysim        # latest step, gaps vs. dataset
+python -m riskstream.cli check-serving-parity --dataset paysim --steps 2   # rolled back; repeatable
+python scripts/demo_api.py                                       # plays the next hour over HTTP (kept)
 ```
+
+* `check-serving-parity` scores real PaySim rows through the service and
+  compares every feature and probability with the offline pipeline. It runs in
+  one database transaction that is rolled back, so it leaves the database
+  unchanged and can be repeated. Pass `--commit` to keep the rows.
+* `scripts/demo_api.py` scores every transaction of the next simulated hour,
+  with real ids and in event order, so each request sees exactly the history
+  the model trained with. It refuses to run if the stored history has gaps.
+* `delete-scored --from-step N --yes` (owner role, audited) removes
+  API-scored rows from step N onward. Backfilled history is never deleted.
 
 Use `127.0.0.1`, not `localhost`, in database URLs on Windows: `localhost`
 tries IPv6 first and added about 5 s to every connection to the Docker
@@ -164,13 +173,8 @@ single-client numbers, not load-test results (Phase 9).
 | history backfill, steps 1-595 | 6,244,474 rows in 647 s; table 1.0 GB + indexes 0.8 GB |
 | serving parity, steps 596-597 | 11,805 transactions through the real scoring path; 401,370 feature values compared, 0 mismatches (max difference 1.5e-5, float32 rounding); probabilities and decisions identical for all rows |
 | per-request time, parity run (in process) | p50 31 ms, p95 39 ms, p99 49 ms. Stored breakdown: feature lookup + derivation p50 11.6 ms, model p50 1.6 ms; the rest is the idempotency check and the write transaction |
-| HTTP walkthrough, 199 sequential new requests | client-side p50 37 ms, p95 60 ms, p99 109 ms |
-
-`scripts/demo_api.py` scores test-period rows (step 670 and later), but the
-database only holds history through step 597. Those requests therefore see a
-gap of about 72 hours in each account's history. They exercise the API
-correctly, but their features are not the ones the model saw offline. The
-parity check above is the evidence for feature correctness.
+| serving parity, steps 598-599, rolled back, run twice | 2,750 transactions each run, 0 mismatches, identical probabilities; database row counts unchanged after both runs |
+| HTTP demo, step 598 (934 transactions, one client) | 930 APPROVE, 4 DECLINE; the 4 declines are the hour's 4 fraud rows; client-side p50 39 ms, p95 89 ms, p99 124 ms |
 
 ## Datasets
 

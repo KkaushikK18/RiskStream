@@ -83,6 +83,7 @@ class TransactionRow(Base):
         CheckConstraint(_in("dest_type", DEST_TYPES), name="ck_transactions_dest_type"),
         Index("ix_transactions_dest_step", "dest_id", "step"),
         Index("ix_transactions_orig_step", "orig_id", "step"),
+        Index("ix_transactions_step", "step"),
     )
 
 

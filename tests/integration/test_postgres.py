@@ -107,6 +107,48 @@ def test_concurrent_duplicate_scores_store_one_prediction(pg_engine, artifacts):
     engine.dispose()
 
 
+def test_serving_parity_rolls_back_and_is_repeatable(pg_engine, small_canonical, artifacts):
+    """Rolled-back parity: features match offline, the database is unchanged, and a
+    second run on the same steps works."""
+    import polars as pl
+    from sqlalchemy import func, select
+
+    from riskstream.config import AppConfig
+    from riskstream.features.offline import build_feature_frame
+    from riskstream.features.registry import get_registry
+    from riskstream.inference.model_loader import load_serving_model
+    from riskstream.inference.predictor import ScoringService
+    from riskstream.inference.serving_parity import check_serving_parity
+    from riskstream.storage.admin import seed_history
+    from riskstream.storage.database import create_db_engine
+    from riskstream.storage.models import OutboxEventRow, PredictionRow, TransactionRow
+
+    registry, cfg = get_registry(), AppConfig.load()
+    seed_history(pg_engine, "synthetic", canonical=small_canonical, until_step=30)
+    offline = build_feature_frame(small_canonical, registry).collect()
+    engine = create_db_engine(URL, cfg)
+    model = load_serving_model(artifacts["bundle"], artifacts["policy"], registry, False)
+
+    def counts():
+        from sqlalchemy.orm import Session
+
+        with Session(pg_engine) as s:
+            return tuple(s.execute(select(func.count()).select_from(m)).scalar_one()
+                         for m in (TransactionRow, PredictionRow, OutboxEventRow))
+
+    before = counts()
+    runs = [check_serving_parity(engine, model, lambda ss: ScoringService(ss, model, registry, cfg, "p"),
+                                 "synthetic", None, 3, canonical=small_canonical,
+                                 offline_rows=lambda ids: offline.filter(pl.col("transaction_id").is_in(ids)))
+            for _ in range(2)]
+    engine.dispose()
+    for r in runs:
+        assert r["start_step"] == 31 and r["mode"] == "rolled_back"
+        assert r["rows_scored"] > 0 and r["feature_mismatches"] == 0
+        assert r["decisions_identical"] == r["rows_scored"]
+    assert counts() == before
+
+
 def test_statement_timeout_is_applied(pg_engine):
     from sqlalchemy import text
     from sqlalchemy.exc import OperationalError

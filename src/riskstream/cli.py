@@ -147,18 +147,50 @@ def cmd_check_serving_parity(args: argparse.Namespace) -> int:
     from riskstream.inference.model_loader import load_serving_model
     from riskstream.inference.predictor import ScoringService
     from riskstream.inference.serving_parity import check_serving_parity
-    from riskstream.storage.database import create_db_engine, session_factory
+    from riskstream.storage.database import create_db_engine
 
     settings, cfg = get_settings(), AppConfig.load()
     engine = create_db_engine(_require_url(settings.database_url, "DATABASE_URL"), cfg)
-    model = load_serving_model(settings.model_bundle_path, settings.policy_path, get_registry(), False)
-    service = ScoringService(session_factory(engine), model, get_registry(), cfg, "serving-parity-check")
+    registry = get_registry()
+    model = load_serving_model(settings.model_bundle_path, settings.policy_path, registry, False)
     try:
-        result = check_serving_parity(service, args.dataset, args.start_step, args.steps, args.limit)
+        result = check_serving_parity(
+            engine, model, lambda sessions: ScoringService(sessions, model, registry, cfg, "serving-parity-check"),
+            args.dataset, args.start_step, args.steps, args.limit, commit=args.commit)
     finally:
         engine.dispose()
     print(json.dumps(result, indent=2, default=str))
     return 0 if result["feature_mismatches"] == 0 else 2
+
+
+def cmd_delete_scored(args: argparse.Namespace) -> int:
+    from riskstream.config import get_settings
+    from riskstream.storage.admin import admin_engine, delete_scored
+
+    if not args.yes:
+        raise SystemExit("Refusing to delete without --yes")
+    engine = admin_engine(_require_url(get_settings().admin_database_url, "MIGRATION_DATABASE_URL"))
+    try:
+        print(json.dumps(delete_scored(engine, from_step=args.from_step, actor="cli"), indent=2))
+    finally:
+        engine.dispose()
+    return 0
+
+
+def cmd_history_status(args: argparse.Namespace) -> int:
+    from riskstream.config import get_settings
+    from riskstream.data.ingestion import load_interim
+    from riskstream.storage.admin import admin_engine, history_gaps, latest_stored_step
+
+    engine = admin_engine(_require_url(get_settings().admin_database_url, "MIGRATION_DATABASE_URL"))
+    try:
+        latest = latest_stored_step(engine)
+        gaps = history_gaps(engine, load_interim(args.dataset), latest) if latest else []
+    finally:
+        engine.dispose()
+    print(json.dumps({"latest_stored_step": latest, "next_step": (latest or 0) + 1,
+                      "steps_differing_from_dataset": gaps[:50], "gap_count": len(gaps)}, indent=2))
+    return 0
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -214,10 +246,21 @@ def build_parser() -> argparse.ArgumentParser:
 
     sp = sub.add_parser("check-serving-parity", help="Score dataset rows through the service and compare with offline")
     sp.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
-    sp.add_argument("--start-step", type=int, required=True)
+    sp.add_argument("--start-step", type=int, help="Default: the step after the latest stored one")
     sp.add_argument("--steps", type=int, default=1)
     sp.add_argument("--limit", type=int)
+    sp.add_argument("--commit", action="store_true",
+                    help="Keep the scored rows (default: roll back so the check is repeatable)")
     sp.set_defaults(func=cmd_check_serving_parity)
+
+    ds = sub.add_parser("delete-scored", help="Delete API-scored rows at step >= N (backfill untouched)")
+    ds.add_argument("--from-step", type=int, required=True)
+    ds.add_argument("--yes", action="store_true", help="Required: confirms the deletion")
+    ds.set_defaults(func=cmd_delete_scored)
+
+    hs = sub.add_parser("history-status", help="Latest stored step and any gaps versus the dataset")
+    hs.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    hs.set_defaults(func=cmd_history_status)
     return p
 
 
