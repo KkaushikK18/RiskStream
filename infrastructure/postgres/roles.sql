@@ -15,6 +15,10 @@ SELECT 'CREATE DATABASE riskstream OWNER riskstream_owner'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'riskstream') \gexec
 SELECT 'CREATE DATABASE riskstream_test OWNER riskstream_owner'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'riskstream_test') \gexec
+-- MLflow tracking server backend (Phase 5). Owned by the owner role; the API role has no access.
+SELECT 'CREATE DATABASE mlflow OWNER riskstream_owner'
+WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'mlflow') \gexec
+REVOKE ALL ON DATABASE mlflow FROM PUBLIC;
 
 \connect riskstream
 REVOKE ALL ON DATABASE riskstream FROM PUBLIC;

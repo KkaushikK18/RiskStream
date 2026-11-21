@@ -74,6 +74,9 @@ class Settings(BaseSettings):
     # Key used by the scoring worker to call the API (a key with the scorer role).
     worker_api_key: str | None = None
     api_base_url: str = "http://127.0.0.1:8000"
+    # Interface for worker /metrics servers: 127.0.0.1 on a laptop, 0.0.0.0 in a container
+    # (only reachable on the Compose network; the ports are not published).
+    metrics_host: str = "127.0.0.1"
 
     @property
     def admin_database_url(self) -> str | None:

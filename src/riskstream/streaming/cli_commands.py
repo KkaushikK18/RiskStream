@@ -36,8 +36,9 @@ def _metrics(port: int | None) -> None:
     if port:
         from prometheus_client import start_http_server
 
-        start_http_server(port, addr="127.0.0.1")
-        logger.info("metrics on http://127.0.0.1:%d/metrics", port)
+        host = get_settings().metrics_host
+        start_http_server(port, addr=host)
+        logger.info("metrics on http://%s:%d/metrics", host, port)
 
 
 def cmd_topics_create(args: argparse.Namespace) -> int:
@@ -54,9 +55,25 @@ def cmd_online_bootstrap(args: argparse.Namespace) -> int:
 
     settings, cfg = get_settings(), StreamingConfig.load()
     store = _store(settings, cfg)
+    from riskstream.features.online_bootstrap import BootstrapInProgress, wait_for_bootstrap
+
+    if args.if_needed:
+        meta = store.read_meta()
+        if meta.get("bootstrap_completed_at_ms") and meta.get("layout") == cfg.namespace:
+            print(json.dumps({"skipped": True, "reason": "store already bootstrapped",
+                              "bootstrap_completed_at_ms": meta["bootstrap_completed_at_ms"]}))
+            return 0
     engine = admin_engine(_need(settings.admin_database_url, "MIGRATION_DATABASE_URL"))
     try:
-        print(json.dumps(bootstrap(store, engine), indent=2))
+        try:
+            print(json.dumps(bootstrap(store, engine), indent=2))
+        except BootstrapInProgress:
+            if not args.if_needed:
+                raise SystemExit("another bootstrap is running; wait for it to finish") from None
+            logger.info("another bootstrap is running; waiting for it")
+            if not wait_for_bootstrap(store):
+                raise SystemExit("bootstrap by another process did not complete") from None
+            print(json.dumps({"skipped": True, "reason": "bootstrapped by another process"}))
     finally:
         engine.dispose()
     return 0
@@ -108,9 +125,15 @@ def cmd_run_feature_consumer(args: argparse.Namespace) -> int:
 
     settings, cfg = get_settings(), StreamingConfig.load()
     _metrics(args.metrics_port)
-    runner = _runner(FeatureUpdateProcessor(_store(settings, cfg)), args.group, cfg.topic_scored, settings, cfg,
-                     f"feature-updater-{settings.instance_id}")
-    print(json.dumps(runner.run(max_messages=args.max_messages, idle_exit_s=args.idle_exit)))
+    from riskstream.streaming.consumers import StoreLost
+
+    processor = FeatureUpdateProcessor(_store(settings, cfg), exit_on_store_lost=args.exit_on_store_lost)
+    runner = _runner(processor, args.group, cfg.topic_scored, settings, cfg, f"feature-updater-{settings.instance_id}")
+    try:
+        print(json.dumps(runner.run(max_messages=args.max_messages, idle_exit_s=args.idle_exit)))
+    except StoreLost as exc:
+        logger.error("%s; exiting so the supervisor can rebuild the store and restart", exc)
+        return 3
     return 0
 
 
@@ -358,6 +381,8 @@ def register(sub: Any) -> None:
     p.set_defaults(func=cmd_topics_create)
 
     p = sub.add_parser("online-bootstrap", help="Rebuild Redis online features from a PostgreSQL snapshot")
+    p.add_argument("--if-needed", action="store_true",
+                   help="Do nothing if the store is already bootstrapped (used at container start)")
     p.set_defaults(func=cmd_online_bootstrap)
 
     p = sub.add_parser("run-relay", help="Publish outbox events to Kafka")
@@ -374,6 +399,9 @@ def register(sub: Any) -> None:
         p.add_argument("--group", default=group)
         p.add_argument("--max-messages", type=int)
         p.add_argument("--idle-exit", type=float, help="Exit after this many idle seconds")
+        if name == "run-feature-consumer":
+            p.add_argument("--exit-on-store-lost", action="store_true",
+                           help="Exit (code 3) when the store is wiped, so a supervisor re-bootstraps and restarts")
         p.set_defaults(func=func)
 
     p = sub.add_parser("replay", help="Publish dataset transactions to transactions.ingested")

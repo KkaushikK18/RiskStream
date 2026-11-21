@@ -94,6 +94,9 @@ def _setup_mlflow(experiment: str) -> str:
     mlflow.set_tracking_uri(get_settings().mlflow_tracking_uri)
     exp = mlflow.get_experiment_by_name(experiment)
     if exp is None:
+        if get_settings().mlflow_tracking_uri.startswith(("http://", "https://")):
+            # Tracking server with --serve-artifacts: it chooses and proxies artifact storage.
+            return mlflow.create_experiment(experiment)
         artifacts = (PROJECT_ROOT / "mlruns").resolve()
         artifacts.mkdir(exist_ok=True)
         return mlflow.create_experiment(experiment, artifact_location=artifacts.as_uri())

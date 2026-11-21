@@ -1,0 +1,10 @@
+# Only code, configs and the lock file go into the image.
+*
+!Dockerfile
+!requirements-lock.txt
+!alembic.ini
+!pyproject.toml
+!configs/**
+!src/**
+**/__pycache__
+**/*.pyc

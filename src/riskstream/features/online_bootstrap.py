@@ -125,9 +125,48 @@ def _write_dedupe(store: RedisFeatureStore, event_ids: list[str], batch: int) ->
     pipe.execute()
 
 
+class BootstrapInProgress(RuntimeError):
+    pass
+
+
+LOCK_TTL_S = 1800
+
+
+def lock_key(store: RedisFeatureStore) -> str:
+    # Outside the namespace pattern ("{ns}:*"), so clear_namespace() never deletes it.
+    return f"{store.ns}-lock:bootstrap"
+
+
+def wait_for_bootstrap(store: RedisFeatureStore, timeout_s: float = LOCK_TTL_S) -> bool:
+    """Wait for another process's bootstrap to finish. True if the store became usable."""
+    deadline = time.monotonic() + timeout_s
+    while time.monotonic() < deadline:
+        if store.is_bootstrapped():
+            return True
+        if not store.r.exists(lock_key(store)):
+            return store.is_bootstrapped()
+        time.sleep(2)
+    return False
+
+
 def bootstrap(store: RedisFeatureStore, engine: Engine | None = None, *, frame: pl.LazyFrame | None = None,
               event_ids: list[str] | None = None, batch: int = 500) -> dict:
-    """Rebuild the namespace. ``frame``/``event_ids`` replace the PostgreSQL export (tests)."""
+    """Rebuild the namespace. ``frame``/``event_ids`` replace the PostgreSQL export (tests).
+
+    A Redis lock makes concurrent rebuilds impossible (e.g. an operator's manual run
+    while a restarted consumer container runs ``--if-needed``)."""
+    token = str(time.time_ns())
+    if not store.r.set(lock_key(store), token, nx=True, ex=LOCK_TTL_S):
+        raise BootstrapInProgress("another bootstrap holds the lock")
+    try:
+        return _bootstrap(store, engine, frame=frame, event_ids=event_ids, batch=batch)
+    finally:
+        if store.r.get(lock_key(store)) == token:
+            store.r.delete(lock_key(store))
+
+
+def _bootstrap(store: RedisFeatureStore, engine: Engine | None, *, frame: pl.LazyFrame | None,
+               event_ids: list[str] | None, batch: int) -> dict:
     t0 = time.perf_counter()
     store.r.hdel(store.k_meta, "bootstrap_completed_at_ms")  # stop applies first
     with tempfile.TemporaryDirectory() as tmp:

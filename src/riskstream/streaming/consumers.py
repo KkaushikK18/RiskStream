@@ -51,13 +51,21 @@ class TransientError(Exception):
 # ------------------------------------------------------------------ processors
 
 
+class StoreLost(Exception):
+    """The online store was wiped (e.g. Redis restarted) and must be rebuilt before
+    any event can be applied. Not caught by the runner: the process exits, stored
+    offsets are committed, and the container restart runs ``online-bootstrap --if-needed``
+    before consuming again from the last committed offset."""
+
+
 class FeatureUpdateProcessor:
     """transactions.scored -> Redis online features."""
 
     name = "feature-updater"
 
-    def __init__(self, store: RedisFeatureStore) -> None:
+    def __init__(self, store: RedisFeatureStore, exit_on_store_lost: bool = False) -> None:
         self.store = store
+        self.exit_on_store_lost = exit_on_store_lost
 
     def handle(self, msg: Any) -> str:
         try:
@@ -67,13 +75,28 @@ class FeatureUpdateProcessor:
         try:
             applied = self.store.apply(event_id=ev.event_id, dest_id=ev.dest_account_id,
                                        orig_id=ev.orig_account_id, step=ev.step, amount=ev.amount, txn_type=ev.type)
-        except (FeatureStoreError, FeatureStoreNotUsable) as exc:
+        except FeatureStoreNotUsable as exc:
+            if self.exit_on_store_lost and exc.reason == "not_bootstrapped" and not self._bootstrap_running():
+                raise StoreLost("online store is not bootstrapped") from exc
+            raise TransientError(f"online store: {exc}") from exc
+        except FeatureStoreError as exc:
             raise TransientError(f"online store: {exc}") from exc
         sm.END_TO_END_SECONDS.labels(self.name).observe(
             max(0.0, (datetime.now(UTC) - ev.scored_at).total_seconds()))
         return "applied" if applied else "duplicate"
 
+    def _bootstrap_running(self) -> bool:
+        from riskstream.features.online_bootstrap import lock_key
+
+        try:
+            return bool(self.store.r.exists(lock_key(self.store)))
+        except Exception:
+            return True  # unsure: keep retrying rather than exiting
+
     def heartbeat(self, state: str, lag: int | None) -> None:
+        # Detect a wiped store even when no events arrive (e.g. Redis restarted while idle).
+        if self.exit_on_store_lost and not self.store.is_bootstrapped() and not self._bootstrap_running():
+            raise StoreLost("online store is not bootstrapped")
         fields: dict[str, object] = {"consumer_heartbeat_ms": int(time.time() * 1000), "consumer_state": state}
         if lag is not None:
             fields["consumer_lag"] = lag
@@ -186,6 +209,8 @@ class ConsumerRunner:
             self._last_hb = now
             try:
                 self.p.heartbeat(self.state, self._lag_total)
+            except StoreLost:
+                raise
             except Exception as exc:
                 logger.warning("heartbeat failed: %s", exc)
 
@@ -256,7 +281,10 @@ class ConsumerRunner:
                     self._sleep(self.cfg.pause_on_failure_s)
         finally:
             self.state = "stopped"
-            self._maintenance(force=True)
+            try:
+                self._maintenance(force=True)
+            except StoreLost:
+                pass  # already exiting
             self.c.close()  # commits stored offsets and leaves the group
             logger.info("%s stopped: %s", self.p.name, self.counts)
         return self.counts
