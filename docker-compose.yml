@@ -161,7 +161,7 @@ services:
       redis: {condition: service_healthy}
     healthcheck:
       <<: *metrics-health
-      start_period: 600s   # a full bootstrap of 6.26M rows took ~5 min
+      start_period: 600s   # a full bootstrap of 6.26M rows takes ~2 min; headroom for slower machines
     # bootstrap runs in this container; its working set needs the headroom
     deploy: {resources: {limits: {memory: 1536m}}}
 

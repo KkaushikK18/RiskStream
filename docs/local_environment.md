@@ -119,12 +119,12 @@ starting a second rebuild.
 |---|---|
 | image build (first / cached) | 790 s / 16 s; image 1.73 GB; Python 3.14.10, non-root uid 10001 |
 | all profiles up, steady state | ~1.05 GB total across 10 containers (api 102 MB, redis 229 MB, postgres 197 MB, mlflow 138 MB, grafana 91 MB, feature-consumer 90 MB, redpanda 81 MB, prometheus 47 MB, relay 40 MB, scoring-worker 34 MB) |
-| bootstrap inside `feature-consumer` | 6.26M rows in 517 s; peak 876 MB |
+| bootstrap inside `feature-consumer` | 6.26M rows in 121 s (export 40 s, destination stats 18 s, origin stats 50 s, window hashes 10 s); peak 851 MB. Before the bulk-writer rewrite: 517 s |
 | Prometheus targets | api, outbox-relay, feature-consumer, scoring-worker, redpanda, prometheus: all `up` |
 | containerized pipeline, steps 610-612 | 3,890 predictions, 132,260 features vs offline: 0 mismatches |
 | `/v1/score` p95 latency (Prometheus, 15 min) | 40 ms |
 | scored -> applied to Redis (`riskstream_stream_event_age_seconds`) | p50 0.17 s, p95 0.92 s |
-| Redis restarted empty | consumer exited (code 3), was restarted, rebuilt the store and resumed in 562 s, with no manual step. The API fell back to PostgreSQL meanwhile |
+| Redis restarted empty | consumer exited (code 3), was restarted, rebuilt the store and resumed; Redis features usable again after 199 s (was 562 s), with no manual step. The API fell back to PostgreSQL meanwhile |
 | training on the host logged to the MLflow container | run, metrics and the 4 bundle files stored in the `mlflow` database and the `mlartifacts` volume |
 | tests | 188 passed |
 

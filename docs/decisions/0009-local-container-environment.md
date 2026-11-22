@@ -26,7 +26,7 @@ Status: accepted (Phase 5)
 
 ## Consequences
 
-* A cold start with an empty Redis takes ~9 minutes before Redis features are
+* A cold start with an empty Redis takes ~3.5 minutes (measured 199 s) before Redis features are
   used. Scoring works from the first minute, from PostgreSQL.
 * `docker compose down -v` deletes PostgreSQL history, MLflow runs, Prometheus
   data and Grafana state.

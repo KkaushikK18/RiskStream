@@ -55,7 +55,7 @@ net.
 Redis runs with `maxmemory-policy noeviction` and no persistence. When it is
 full, writes fail loudly and the consumer blocks, instead of features
 disappearing. After a Redis restart the store is empty, so the API falls back
-to PostgreSQL until `online-bootstrap` runs again (4.6 min for 6.26M rows).
+to PostgreSQL until `online-bootstrap` runs again (about 2 min for 6.26M rows; see `docs/local_environment.md`).
 
 ## Consistency model
 
