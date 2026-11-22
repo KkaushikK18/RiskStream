@@ -20,13 +20,15 @@ The API falls back to PostgreSQL for the duration (no marker = not usable).
 from __future__ import annotations
 
 import tempfile
+import threading
 import time
+import zlib
 from pathlib import Path
 
 import polars as pl
 from sqlalchemy import Engine
 
-from riskstream.features.online_store import RedisFeatureStore, stat_bucket
+from riskstream.features.online_store import RedisFeatureStore
 from riskstream.logging_config import get_logger
 
 logger = get_logger(__name__)
@@ -81,39 +83,115 @@ def window_frame(lf: pl.LazyFrame, floor: int) -> pl.DataFrame:
     )
 
 
-def _write_lifetime(store: RedisFeatureStore, df: pl.DataFrame, key: str, kind: str, batch: int) -> int:
-    buckets: dict[int, dict[str, str]] = {}
-    n = 0
-    for sl in df.iter_slices(200_000):
-        for ent, total, last, cl, prev in sl.select(key, "total", "last", "cnt_last", "prev").iter_rows():
-            buckets.setdefault(stat_bucket(ent, store.cfg.stat_buckets), {})[ent] = f"{total}|{last}|{cl}|{prev}"
-            n += 1
-    pipe = store.r.pipeline(transaction=False)
-    for i, (b, mapping) in enumerate(buckets.items(), 1):
-        pipe.hset(f"{store.ns}:{kind}:{b}", mapping=mapping)
-        if i % batch == 0:
-            pipe.execute()
-    pipe.execute()
-    return n
+# ---------------------------------------------------------------- bulk writes
+#
+# Redis commands are built as raw RESP protocol text by Polars expressions
+# (vectorized, in Rust) and streamed over one connection in large chunks, like
+# `redis-cli --pipe`. Python only handles one string per command, never one per
+# account: per-entry Python formatting and redis-py argument packing took
+# 161 of 197 s in the previous implementation.
+#
+# RESP bulk string: "$<byte length>\r\n<bytes>\r\n". Command: "*<argc>\r\n" + bulk strings.
+
+CHUNK_BYTES = 8 * 1024 * 1024
 
 
-def _write_windows(store: RedisFeatureStore, df: pl.DataFrame, batch: int) -> int:
-    pipe = store.r.pipeline(transaction=False)
-    keys = 0
-    for i, (dest, rows) in enumerate(df.sort("dest_id").partition_by("dest_id", as_dict=True).items(), 1):
-        dest_id = dest[0] if isinstance(dest, tuple) else dest
-        mapping = {}
-        for step, c, s, lg, q, t in rows.select("step", "c", "s", "l", "q", "t").iter_rows():
-            mapping |= {f"{step}:c": repr(c), f"{step}:s": repr(s), f"{step}:l": repr(lg), f"{step}:q": repr(q),
-                        f"{step}:t": repr(t)}
-        k = store.k_window(dest_id)
-        pipe.hset(k, mapping=mapping)
-        pipe.expire(k, store.cfg.window_key_ttl_s)
-        keys += 1
-        if i % batch == 0:
-            pipe.execute()
-    pipe.execute()
-    return keys
+def _bulk(col: pl.Expr) -> pl.Expr:
+    return pl.format("${}\r\n{}\r\n", col.str.len_bytes(), col)
+
+
+def _send(store: RedisFeatureStore, commands: pl.Series, replies_per_command: int = 1) -> int:
+    """Stream pre-encoded commands; read every reply (errors such as OOM raise)."""
+    conn = store.r.connection_pool.get_connection()
+    sent = 0
+    try:
+        buf: list[str] = []
+        size = 0
+
+        def flush() -> None:
+            nonlocal buf, size, sent
+            if not buf:
+                return
+            payload = "".join(buf).encode("utf-8")
+            conn.send_packed_command([payload], check_health=False)
+            del payload
+            for _ in range(len(buf) * replies_per_command):
+                conn.read_response()
+            sent += len(buf)
+            buf, size = [], 0
+
+        for cmd in commands:
+            buf.append(cmd)
+            size += len(cmd)
+            if size >= CHUNK_BYTES:
+                flush()
+        flush()
+    except BaseException:
+        conn.disconnect()  # protocol state unknown; never reuse this connection
+        raise
+    finally:
+        store.r.connection_pool.release(conn)
+    return sent
+
+
+# Commands are built for 1/GROUPS of the buckets at a time. Building all 6.25M
+# origin accounts at once peaked above the feature-consumer's 1.5 GB limit and
+# the process was OOM-killed inside the container (measured).
+GROUPS = 8
+ID_SLICE = 500_000
+
+
+def _bucket_column(df: pl.DataFrame, key: str, buckets: int) -> pl.Series:
+    # stat_bucket() (crc32) has no Polars equivalent. Slicing keeps the temporary
+    # Python strings to ID_SLICE at a time instead of millions.
+    parts = []
+    for sl in df.select(key).iter_slices(ID_SLICE):
+        parts.append(pl.Series([zlib.crc32(i.encode("utf-8")) % buckets for i in sl[key].to_list()],
+                               dtype=pl.UInt32))
+    return (pl.concat(parts) if parts else pl.Series([], dtype=pl.UInt32)).alias("b")
+
+
+def _lifetime_commands(df: pl.DataFrame, key: str, prefix: str, buckets: int):
+    """Yield one Series of HSET commands per bucket group."""
+    value = pl.format("{}|{}|{}|{}", "total", "last", "cnt_last", "prev")
+    base = df.select(pl.col(key), value.alias("val")).with_columns(_bucket_column(df, key, buckets))
+    k = pl.format("{}:{}", pl.lit(prefix), pl.col("b"))
+    for g in range(GROUPS):
+        part = (base.filter(pl.col("b") % GROUPS == g)
+                .group_by("b").agg(pl.len().alias("n"),
+                                   pl.concat_str(_bulk(pl.col(key)), _bulk(pl.col("val"))).str.join("").alias("pairs")))
+        yield part.select(pl.format("*{}\r\n$4\r\nHSET\r\n{}{}", 2 + 2 * pl.col("n"), _bulk(k),
+                                    pl.col("pairs"))).to_series()
+        del part
+
+
+def _write_lifetime(store: RedisFeatureStore, df: pl.DataFrame, key: str, kind: str, batch: int = 0) -> int:
+    """HSET {ns}:{kind}:{bucket} id "total|last|cnt_last|prev" for every account."""
+    for commands in _lifetime_commands(df, key, f"{store.ns}:{kind}", store.cfg.stat_buckets):
+        _send(store, commands)
+    return len(df)
+
+
+def _window_commands(df: pl.DataFrame, ns: str, ttl_s: int) -> pl.Series:
+    step = pl.col("step").cast(pl.String)
+    pairs = pl.concat_str(*[
+        pl.concat_str(_bulk(pl.concat_str(step, pl.lit(f":{s}"))), _bulk(pl.col(s).cast(pl.String)))
+        for s in ("c", "s", "l", "q", "t")
+    ])
+    per_dest = (df.select("dest_id", pairs.alias("p"))
+                .group_by("dest_id").agg(pl.len().alias("n"), pl.col("p").str.join("")))
+    k = _bulk(pl.concat_str(pl.lit(f"{ns}:dw:"), pl.col("dest_id")))
+    ttl = str(int(ttl_s))
+    # Two commands per account: HSET with all its buckets, then EXPIRE (safety TTL).
+    return per_dest.select(pl.format(
+        "*{}\r\n$4\r\nHSET\r\n{}{}*3\r\n$6\r\nEXPIRE\r\n{}" + f"${len(ttl)}\r\n{ttl}\r\n",
+        2 + 10 * pl.col("n"), k, pl.col("p"), k,
+    )).to_series()
+
+
+def _write_windows(store: RedisFeatureStore, df: pl.DataFrame, batch: int = 0) -> int:
+    """One HSET (all buckets) + EXPIRE per destination with activity in the window."""
+    return _send(store, _window_commands(df, store.ns, store.cfg.window_key_ttl_s), replies_per_command=2)
 
 
 def _write_dedupe(store: RedisFeatureStore, event_ids: list[str], batch: int) -> None:
@@ -129,7 +207,24 @@ class BootstrapInProgress(RuntimeError):
     pass
 
 
-LOCK_TTL_S = 1800
+# Short lease, renewed while the bootstrap runs: if the process dies (e.g. it is
+# OOM-killed) the lock disappears within LOCK_TTL_S instead of blocking recovery.
+LOCK_TTL_S = 30
+LOCK_RENEW_S = 10
+WAIT_TIMEOUT_S = 1800
+
+_RENEW_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('EXPIRE', KEYS[1], ARGV[2])
+end
+return 0
+"""
+_RELEASE_LUA = """
+if redis.call('GET', KEYS[1]) == ARGV[1] then
+  return redis.call('DEL', KEYS[1])
+end
+return 0
+"""
 
 
 def lock_key(store: RedisFeatureStore) -> str:
@@ -137,7 +232,42 @@ def lock_key(store: RedisFeatureStore) -> str:
     return f"{store.ns}-lock:bootstrap"
 
 
-def wait_for_bootstrap(store: RedisFeatureStore, timeout_s: float = LOCK_TTL_S) -> bool:
+class _Lease:
+    """Redis lock owned by a token; a daemon thread renews it until release()."""
+
+    def __init__(self, store: RedisFeatureStore) -> None:
+        self.store, self.key = store, lock_key(store)
+        self.token = f"{time.time_ns()}-{threading.get_ident()}"
+        self._stop = threading.Event()
+        self._thread: threading.Thread | None = None
+
+    def acquire(self) -> bool:
+        if not self.store.r.set(self.key, self.token, nx=True, ex=LOCK_TTL_S):
+            return False
+        self._thread = threading.Thread(target=self._renew, name="bootstrap-lease", daemon=True)
+        self._thread.start()
+        return True
+
+    def _renew(self) -> None:
+        while not self._stop.wait(LOCK_RENEW_S):
+            try:
+                if not self.store.r.eval(_RENEW_LUA, 1, self.key, self.token, LOCK_TTL_S):
+                    logger.error("bootstrap lease lost")
+                    return
+            except Exception as exc:  # Redis hiccup: try again on the next tick
+                logger.warning("bootstrap lease renewal failed: %s", exc)
+
+    def release(self) -> None:
+        self._stop.set()
+        if self._thread is not None:
+            self._thread.join(timeout=5)
+        try:
+            self.store.r.eval(_RELEASE_LUA, 1, self.key, self.token)
+        except Exception as exc:
+            logger.warning("bootstrap lease release failed (expires in %ss): %s", LOCK_TTL_S, exc)
+
+
+def wait_for_bootstrap(store: RedisFeatureStore, timeout_s: float = WAIT_TIMEOUT_S) -> bool:
     """Wait for another process's bootstrap to finish. True if the store became usable."""
     deadline = time.monotonic() + timeout_s
     while time.monotonic() < deadline:
@@ -155,14 +285,13 @@ def bootstrap(store: RedisFeatureStore, engine: Engine | None = None, *, frame: 
 
     A Redis lock makes concurrent rebuilds impossible (e.g. an operator's manual run
     while a restarted consumer container runs ``--if-needed``)."""
-    token = str(time.time_ns())
-    if not store.r.set(lock_key(store), token, nx=True, ex=LOCK_TTL_S):
+    lease = _Lease(store)
+    if not lease.acquire():
         raise BootstrapInProgress("another bootstrap holds the lock")
     try:
         return _bootstrap(store, engine, frame=frame, event_ids=event_ids, batch=batch)
     finally:
-        if store.r.get(lock_key(store)) == token:
-            store.r.delete(lock_key(store))
+        lease.release()
 
 
 def _bootstrap(store: RedisFeatureStore, engine: Engine | None, *, frame: pl.LazyFrame | None,
@@ -180,18 +309,33 @@ def _bootstrap(store: RedisFeatureStore, engine: Engine | None, *, frame: pl.Laz
             lf = frame.select(list(SCHEMA)).cast(SCHEMA)
             event_ids = event_ids or []
         t_export = time.perf_counter()
+        stages: dict[str, float] = {}
+
+        def mark(name: str, since: float) -> float:
+            now = time.perf_counter()
+            stages[name] = round(now - since, 1)
+            return now
+
+        # Stay lazy: each stage scans the snapshot file again (~1 s). Materializing all
+        # rows once pushed the container past its 1.5 GB limit (measured: killed).
         rows, max_step = lf.select(pl.len(), pl.col("step").max()).collect().row(0)
+        t = mark("load", t_export)
         removed = store.clear_namespace()
         max_step = int(max_step or 0)
         floor = max_step + 1 - store.max_window
+        t = mark("clear", t)
         dest = lifetime_frame(lf, "dest_id")
         n_dest = _write_lifetime(store, dest, "dest_id", "da", batch)
         del dest
+        t = mark("dest_lifetime", t)
         orig = lifetime_frame(lf, "orig_id")
         n_orig = _write_lifetime(store, orig, "orig_id", "oa", batch)
         del orig
+        t = mark("orig_lifetime", t)
         n_windows = _write_windows(store, window_frame(lf, floor), batch)
+        t = mark("windows", t)
         _write_dedupe(store, event_ids, 5000)
+        mark("dedupe", t)
     now_ms = int(time.time() * 1000)
     store.r.hset(store.k_meta, mapping={
         "layout": store.ns, "window_floor": str(floor), "bootstrap_rows": str(rows),
@@ -202,6 +346,6 @@ def _bootstrap(store: RedisFeatureStore, engine: Engine | None, *, frame: pl.Laz
     out = {"rows": int(rows), "max_step": max_step, "window_floor": floor, "dest_accounts": n_dest,
            "orig_accounts": n_orig, "window_hashes": n_windows, "dedupe_event_ids": len(event_ids),
            "keys_removed_first": removed, "export_seconds": round(t_export - t0, 1),
-           "total_seconds": round(time.perf_counter() - t0, 1)}
+           "stage_seconds": stages, "total_seconds": round(time.perf_counter() - t0, 1)}
     logger.info("Online store bootstrapped: %s", out)
     return out

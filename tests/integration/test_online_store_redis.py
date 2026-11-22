@@ -43,6 +43,94 @@ def same(a, b) -> bool:
     return b is not None and math.isclose(float(a), float(b), rel_tol=1e-9, abs_tol=1e-6)
 
 
+def _reference_hashes(store, lf):
+    """The original per-entry implementation (redis-py HSET per bucket / per account)."""
+    from riskstream.features import online_bootstrap as ob
+    from riskstream.features.online_store import stat_bucket
+
+    pipe = store.r.pipeline(transaction=False)
+    for key, kind in (("dest_id", "da"), ("orig_id", "oa")):
+        buckets: dict[int, dict[str, str]] = {}
+        for ent, total, last, cl, prev in ob.lifetime_frame(lf, key).select(
+                key, "total", "last", "cnt_last", "prev").iter_rows():
+            buckets.setdefault(stat_bucket(ent, store.cfg.stat_buckets), {})[ent] = f"{total}|{last}|{cl}|{prev}"
+        for b, mapping in buckets.items():
+            pipe.hset(f"{store.ns}:{kind}:{b}", mapping=mapping)
+    floor = lf.select(pl.col("step").max()).collect().item() + 1 - store.max_window
+    for dest, rows in ob.window_frame(lf, floor).partition_by("dest_id", as_dict=True).items():
+        mapping = {}
+        for step, c, s, lg, q, t in rows.select("step", "c", "s", "l", "q", "t").iter_rows():
+            mapping |= {f"{step}:c": repr(c), f"{step}:s": repr(s), f"{step}:l": repr(lg), f"{step}:q": repr(q),
+                        f"{step}:t": repr(t)}
+        pipe.hset(store.k_window(dest[0]), mapping=mapping)
+    pipe.execute()
+    return _dump(store)
+
+
+def _dump(store):
+    keys = sorted(k for k in store.r.scan_iter(f"{store.ns}:*") if ":d" in k or ":o" in k)
+    return {k: store.r.hgetall(k) for k in keys if store.r.type(k) == "hash" and not k.endswith(":meta")}
+
+
+def test_bulk_writer_matches_reference_byte_for_byte(store, small_canonical):
+    """The RESP bulk writer must produce exactly the hashes the original code wrote."""
+    from riskstream.features import online_bootstrap as ob
+
+    lf = small_canonical.select(list(ob.SCHEMA)).cast(ob.SCHEMA)
+    ref = _reference_hashes(store, lf)
+    store.clear_namespace()
+    ob.bootstrap(store, frame=lf)
+    got = _dump(store)
+    assert set(got) == set(ref) and len(got) > 100
+    assert got == ref
+    ttls = [store.r.ttl(k) for k in got if ":dw:" in k]
+    assert ttls and all(0 < t <= store.cfg.window_key_ttl_s for t in ttls)
+
+
+def test_bulk_writer_handles_non_ascii_ids(store):
+    from riskstream.features import online_bootstrap as ob
+
+    lf = pl.LazyFrame({"dest_id": ["CÄ€é漢", "C2"], "orig_id": ["O€", "O2"], "step": [5, 6],
+                       "amount": [1.5, 2.0], "type": ["TRANSFER", "PAYMENT"]}).cast(ob.SCHEMA)
+    ob.bootstrap(store, frame=lf)
+    live(store)
+    p = store.primitives("CÄ€é漢", "O€", 7)
+    assert p["dest_p_cnt_all"] == 1 and p["dest_p_transfer_cnt_24"] == 1 and p["orig_p_cnt_all"] == 1
+
+
+def test_lock_of_crashed_bootstrap_expires(store, monkeypatch):
+    """A bootstrap that dies without releasing its lock must not block recovery for long."""
+    from riskstream.features import online_bootstrap as ob
+
+    monkeypatch.setattr(ob, "LOCK_TTL_S", 2)
+    store.r.set(ob.lock_key(store), "dead-process", ex=ob.LOCK_TTL_S)  # what a killed process leaves
+    with pytest.raises(ob.BootstrapInProgress):
+        ob.bootstrap(store, frame=pl.LazyFrame({"dest_id": ["C1"], "orig_id": ["O1"], "step": [1], "amount": [1.0],
+                                                "type": ["PAYMENT"]}).cast(ob.SCHEMA))
+    time.sleep(2.5)
+    ob.bootstrap(store, frame=pl.LazyFrame({"dest_id": ["C1"], "orig_id": ["O1"], "step": [1], "amount": [1.0],
+                                            "type": ["PAYMENT"]}).cast(ob.SCHEMA))
+    assert store.is_bootstrapped() and not store.r.exists(ob.lock_key(store))
+
+
+def test_lease_is_renewed_during_long_bootstrap(store, monkeypatch, small_canonical):
+    from riskstream.features import online_bootstrap as ob
+
+    monkeypatch.setattr(ob, "LOCK_TTL_S", 2)
+    monkeypatch.setattr(ob, "LOCK_RENEW_S", 0.5)
+    real = ob._write_windows
+    seen = {}
+
+    def slow(store_, df, batch=0):
+        time.sleep(3)  # longer than the TTL: survives only if renewed
+        seen["lock_alive"] = bool(store_.r.exists(ob.lock_key(store_)))
+        return real(store_, df, batch)
+
+    monkeypatch.setattr(ob, "_write_windows", slow)
+    ob.bootstrap(store, frame=small_canonical)
+    assert seen["lock_alive"] and not store.r.exists(ob.lock_key(store))
+
+
 def test_apply_refused_before_bootstrap(store):
     from riskstream.features.online_store import FeatureStoreNotUsable
 

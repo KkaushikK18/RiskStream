@@ -33,7 +33,11 @@ def env(small_canonical):
                                topic_scored=f"test.{tag}.scored", topic_dlq=f"test.{tag}.dlq",
                                topic_ingested=f"test.{tag}.ingested", topic_labeled=f"test.{tag}.labeled",
                                max_attempts=2, backoff_initial_s=0.05, pause_on_failure_s=0.1)
-    ensure_topics(KAFKA, cfg)
+    created = ensure_topics(KAFKA, cfg)
+    # Fail fast instead of hanging on a topic that was never created (e.g. the broker's
+    # partition limit was reached by topics left over from killed test runs).
+    bad = {t: s for t, s in created.items() if s.startswith("error")}
+    assert not bad, f"topic creation failed: {bad}. Delete leftover test.* topics: rpk topic list"
     store = RedisFeatureStore.from_url(REDIS, cfg, (24, 168))
     bootstrap(store, frame=small_canonical.filter(pl.col("step") <= 1))
     yield cfg, store, tag

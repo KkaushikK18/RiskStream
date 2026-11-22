@@ -1,0 +1,48 @@
+Q.) Yeah before starting i just want to ask that i again restarted my laptop and the docker engine so do i have to manually run the command again for getting it store inside redis?
+
+You don't need to run anything. The rebuild has already started on its own.
+
+Here's what I see right now:
+
+All 10 containers came back by themselves about 3 minutes after Docker started. They're set to restart: unless-stopped.
+Redis started empty, so the feature-consumer container began rebuilding it: the rebuild lock is held, 70,038 keys are written so far, and the store isn't marked ready yet.
+The rebuild should finish in roughly 5–6 more minutes, based on the earlier 562-second run. After that the API switches to Redis features automatically. Until then, scoring works from PostgreSQL.
+To watch it finish:
+
+powershell
+
+python -m riskstream.cli stream-status
+Look for "usable": true. Or open http://127.0.0.1:8000/health/ready and wait for online_features: ok. You can also follow the consumer's log with docker compose logs -f feature-consumer until it prints Online store bootstrapped.
+
+You'd only need to act in two cases:
+
+You stopped the containers before restarting (docker compose stop or down). They then stay stopped. Start them with docker compose --profile app --profile observability --profile mlflow up -d, and the rebuild runs automatically.
+You run the processes from the venv instead of Docker, as in the Phase 4 live test. Then you do need python -m riskstream.cli online-bootstrap yourself.
+This automatic rebuild is the same one that takes about 9 minutes. Option 1, making the bootstrap code faster, would shorten exactly this wait. Shall I go ahead with it now?
+
+
+Q.) A cold start with an empty Redis takes about 9 minutes before the API uses Redis features. Scoring works from PostgreSQL during that time.
+Why so much time??
+
+Where the 562 seconds went
+I didn't time each stage separately. The breakdown below is reconstructed from Redis key counts I sampled every 10–35 seconds during the restart test, plus the bootstrap's own log.
+
+stage	time	what it does
+Detect the empty Redis, restart the container	~15 s	the consumer notices on its next heartbeat and exits
+Export 6.26M rows from PostgreSQL	~33 s	from the bootstrap log
+Destination lifetime stats, 2.68M accounts	~45 s	compute per account, write 32,768 hashes
+Origin lifetime stats, 6.25M accounts	~2 min	same work, 2.3 times as many accounts
+Window hashes, 229,604 accounts, plus duplicate markers	~5.5 min	the slow part
+Why the window stage is slow
+_write_windows in 
+online_bootstrap.py
+ splits the data with partition_by("dest_id"). That creates 229,604 tiny Polars DataFrames, one per destination account. Each one is then looped over row by row in Python to build its fields. Creating a DataFrame costs roughly a millisecond whatever its size, and 229,604 of them adds up to minutes. The Redis writes themselves are pipelined and cheap.
+
+The lifetime stages have a smaller version of the same problem. They go through 8.9M accounts one at a time in Python to format strings like total|last|cnt_last|prev.
+
+Two other factors
+Data size: PaySim has 8.9M accounts because 99.85% of senders appear only once. Each one still needs its stats stored for training/serving parity.
+Inside Docker it's slower: the same bootstrap took 276 s from your venv in Phase 4 and 517 s inside the container. The container shares the 2.8 GB Docker VM with PostgreSQL and Redis while running at about 350% CPU. I haven't confirmed which resource is the bottleneck.
+
+How it could be fixed
+Make the bootstrap code faster (recommended). Build the Redis field strings and bucket groupings with Polars column operations instead of Python loops. That removes the 229,604 tiny DataFrames and the 8.9M-row loop. I expect the window stage to drop from minutes to tens of seconds, and the total to fall to roughly 1–2 minutes. I'd measure that rather than promise it. It only changes how the same data gets written, and the existing Redis parity tests check that the output stays identical.
