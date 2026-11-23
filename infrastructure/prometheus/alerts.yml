@@ -1,0 +1,215 @@
+# RiskStream alert and recording rules.
+#   Unit tests: infrastructure/prometheus/tests/alerts_test.yml (promtool test rules)
+#   Runbooks:   docs/incident_runbooks.md (one section per alert)
+#
+# Thresholds are set against measured local behaviour (Phase 5/6 docs):
+#   /v1/score p95 ~40 ms, scored -> Redis p95 ~0.9 s, cold online-store rebuild ~3.5 min.
+# severity: critical = decisions are failing or at risk now; warning = degraded or trending bad.
+
+groups:
+  - name: riskstream-recording
+    rules:
+      - record: riskstream:http_requests:rate5m
+        expr: sum by (route, status) (rate(riskstream_http_requests_total{route=~"/v1/.*"}[5m]))
+      - record: riskstream:http_5xx_ratio:rate5m
+        expr: >
+          (sum(rate(riskstream_http_requests_total{route=~"/v1/.*", status=~"5.."}[5m])) or vector(0))
+          / clamp_min(sum(rate(riskstream_http_requests_total{route=~"/v1/.*"}[5m])), 1e-9)
+      - record: riskstream:score_latency_seconds:p95_5m
+        expr: histogram_quantile(0.95, sum by (le) (rate(riskstream_http_request_duration_seconds_bucket{route="/v1/score"}[5m])))
+      - record: riskstream:feature_fallback_ratio:rate10m
+        expr: >
+          (sum(rate(riskstream_feature_source_total{source="postgres_fallback"}[10m])) or vector(0))
+          / clamp_min(sum(rate(riskstream_feature_source_total[10m])), 1e-9)
+
+  - name: riskstream-availability
+    rules:
+      - alert: ServiceDown
+        expr: up{tier="app"} == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.job }} is not reachable by Prometheus"
+          description: "Scrapes of {{ $labels.instance }} have failed for 1 minute."
+          runbook_url: docs/incident_runbooks.md#servicedown
+      - alert: InfraExporterDown
+        expr: up{tier="infra"} == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "metrics for {{ $labels.job }} are missing"
+          description: "The {{ $labels.job }} scrape target {{ $labels.instance }} has been down for 1 minute."
+          runbook_url: docs/incident_runbooks.md#infraexporterdown
+      - alert: PostgresDown
+        expr: pg_up == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "PostgreSQL is down: scoring is failing closed (503)"
+          description: "postgres_exporter cannot connect. The API returns 503 for every score request."
+          runbook_url: docs/incident_runbooks.md#postgresdown
+      - alert: RedisDown
+        expr: redis_up == 0
+        for: 1m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis is down: scoring uses PostgreSQL features, feature updates are blocked"
+          description: "Scoring continues (slower). The feature consumer is retrying and will rebuild the store when Redis returns."
+          runbook_url: docs/incident_runbooks.md#redisdown
+      - alert: ModelNotLoaded
+        expr: riskstream_model_loaded == 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "API instance {{ $labels.instance }} has no model loaded"
+          description: "Readiness is 503 and /v1/score is unavailable on this instance."
+          runbook_url: docs/incident_runbooks.md#modelnotloaded
+
+  - name: riskstream-api
+    rules:
+      - alert: ApiHighErrorRate
+        expr: riskstream:http_5xx_ratio:rate5m > 0.05 and sum(rate(riskstream_http_requests_total{route=~"/v1/.*"}[5m])) > 0.1
+        for: 5m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of /v1 requests fail with 5xx"
+          description: "More than 5% of API requests returned 5xx for 5 minutes."
+          runbook_url: docs/incident_runbooks.md#apihigherrorrate
+      - alert: ApiHighLatency
+        expr: riskstream:score_latency_seconds:p95_5m > 0.25
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "/v1/score p95 is {{ $value | humanizeDuration }}"
+          description: "p95 above 250 ms for 10 minutes (measured baseline ~40 ms)."
+          runbook_url: docs/incident_runbooks.md#apihighlatency
+      - alert: ApiLoadShedding
+        expr: increase(riskstream_load_shed_total[5m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "API is rejecting requests at its in-flight limit"
+          description: "{{ $value | humanize }} requests shed with 503 in the last 5 minutes."
+          runbook_url: docs/incident_runbooks.md#apiloadshedding
+      - alert: DatabaseErrors
+        expr: increase(riskstream_dependency_errors_total{dependency="database"}[5m]) > 0
+        labels: {severity: critical}
+        annotations:
+          summary: "API database calls are failing"
+          description: "{{ $value | humanize }} database errors on {{ $labels.instance }} in 5 minutes."
+          runbook_url: docs/incident_runbooks.md#databaseerrors
+      - alert: DbPoolSaturated
+        expr: riskstream_db_pool_checked_out / riskstream_db_pool_capacity > 0.9
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "API connection pool is over 90% in use"
+          description: "Requests will start waiting for connections and time out after 2 s."
+          runbook_url: docs/incident_runbooks.md#dbpoolsaturated
+
+  - name: riskstream-features
+    rules:
+      - alert: OnlineStoreUnusable
+        expr: riskstream_online_store_usable == 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis features not used for 10 minutes"
+          description: "A rebuild takes ~3.5 min; 10 min means it is stuck or the pipeline is unhealthy. See riskstream_online_store_state for the reason."
+          runbook_url: docs/incident_runbooks.md#onlinestoreunusable
+      - alert: FeatureFallbackHigh
+        expr: riskstream:feature_fallback_ratio:rate10m > 0.2 and sum(rate(riskstream_feature_source_total[10m])) > 0.05
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $value | humanizePercentage }} of requests use PostgreSQL fallback features"
+          description: "Latency is higher than normal; check riskstream_feature_fallbacks_total by reason."
+          runbook_url: docs/incident_runbooks.md#featurefallbackhigh
+
+  - name: riskstream-streaming
+    rules:
+      - alert: ConsumerBlocked
+        expr: max by (consumer) (riskstream_consumer_blocked) == 1
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $labels.consumer }} is blocked on a transient error"
+          description: "It retries the same message without skipping; lag grows until the dependency recovers."
+          runbook_url: docs/incident_runbooks.md#consumerblocked
+      - alert: FeatureConsumerStalled
+        expr: riskstream_feature_consumer_stalled_seconds > 60
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "feature consumer has made no progress for {{ $value | humanizeDuration }} while lagging"
+          description: "Measured from the broker by the relay, so it works even if the consumer is dead."
+          runbook_url: docs/incident_runbooks.md#featureconsumerstalled
+      - alert: ConsumerLagHigh
+        expr: sum by (consumer) (riskstream_consumer_lag_messages) > 1000
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.consumer }} lag is {{ $value | humanize }} messages"
+          description: "Above 1000 the API stops using Redis features (freshness rule)."
+          runbook_url: docs/incident_runbooks.md#consumerlaghigh
+      - alert: OutboxBacklogStale
+        expr: riskstream_outbox_oldest_unpublished_age_seconds > 60
+        for: 2m
+        labels: {severity: critical}
+        annotations:
+          summary: "oldest unpublished outbox event is {{ $value | humanizeDuration }} old"
+          description: "The relay is not publishing; downstream features and monitoring are falling behind."
+          runbook_url: docs/incident_runbooks.md#outboxbacklogstale
+      - alert: DeadLetters
+        expr: increase(riskstream_dlq_messages_total[15m]) > 0
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.consumer }} dead-lettered {{ $value | humanize }} message(s)"
+          description: "Inspect with: python -m riskstream.cli dlq-inspect"
+          runbook_url: docs/incident_runbooks.md#deadletters
+      - alert: RedpandaUnavailablePartitions
+        expr: max(redpanda_cluster_unavailable_partitions) > 0
+        for: 1m
+        labels: {severity: critical}
+        annotations:
+          summary: "{{ $value }} Redpanda partition(s) unavailable"
+          description: "Producers and consumers on those partitions are stuck."
+          runbook_url: docs/incident_runbooks.md#redpandaunavailablepartitions
+
+  - name: riskstream-capacity
+    rules:
+      - alert: PostgresConnectionsHigh
+        expr: sum(pg_stat_activity_count) / max(pg_settings_max_connections) > 0.8
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "PostgreSQL at {{ $value | humanizePercentage }} of max_connections"
+          description: "New connections will be refused when the limit is reached."
+          runbook_url: docs/incident_runbooks.md#postgresconnectionshigh
+      - alert: RedisMemoryHigh
+        expr: redis_memory_used_bytes / redis_memory_max_bytes > 0.85 and redis_memory_max_bytes > 0
+        for: 10m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redis at {{ $value | humanizePercentage }} of maxmemory"
+          description: "Policy is noeviction: at 100% feature writes fail and the consumer blocks."
+          runbook_url: docs/incident_runbooks.md#redismemoryhigh
+      - alert: ProcessMemoryNearLimit
+        # Container limits from docker-compose.yml; thresholds ~85% of each.
+        expr: >
+          process_resident_memory_bytes{job="api"} > 650e6
+          or process_resident_memory_bytes{job="feature-consumer"} > 1300e6
+          or process_resident_memory_bytes{job=~"outbox-relay|scoring-worker"} > 325e6
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "{{ $labels.job }} uses {{ $value | humanize1024 }}B, close to its container limit"
+          description: "The container will be OOM-killed (exit 137) at its limit."
+          runbook_url: docs/incident_runbooks.md#processmemorynearlimit
+      - alert: RedpandaDiskLow
+        expr: max(redpanda_storage_disk_free_space_alert) > 0
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "Redpanda reports low disk space"
+          description: "When the disk fills, producers are rejected."
+          runbook_url: docs/incident_runbooks.md#redpandadisklow

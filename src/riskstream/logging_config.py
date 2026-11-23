@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import json
 import logging
+import os
 import sys
 from datetime import UTC, datetime
 from pathlib import Path
@@ -43,12 +44,19 @@ class RedactingFilter(logging.Filter):
 class JSONFormatter(logging.Formatter):
     """One JSON object per line. Extra fields passed via ``extra=`` are included."""
 
+    def __init__(self, service: str | None = None, instance: str | None = None,
+                 environment: str | None = None) -> None:
+        super().__init__()
+        self.static = {k: v for k, v in (("service", service), ("instance", instance),
+                                         ("environment", environment)) if v}
+
     def format(self, record: logging.LogRecord) -> str:
         payload: dict[str, object] = {
             "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
             "level": record.levelname,
             "logger": record.name,
             "message": record.getMessage(),
+            **self.static,
         }
         for key, value in record.__dict__.items():
             if key not in _RESERVED and not key.startswith("_"):
@@ -72,7 +80,8 @@ def setup_logging(
 
     formatter: logging.Formatter
     if fmt == "json":
-        formatter = JSONFormatter()
+        formatter = JSONFormatter(service=os.environ.get("SERVICE_NAME"), instance=settings.instance_id,
+                                  environment=settings.environment)
     else:
         formatter = logging.Formatter(
             "%(asctime)s %(levelname)-7s %(name)s [%(request_id)s] - %(message)s", "%Y-%m-%d %H:%M:%S"

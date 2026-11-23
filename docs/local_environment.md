@@ -1,4 +1,4 @@
-# Local environment (Phase 5)
+# Local environment (Phase 5, monitoring added in Phase 6)
 
 Everything runs in Docker Compose on one machine. Nothing needs AWS or other
 cloud credentials.
@@ -18,6 +18,8 @@ flowchart LR
     end
     subgraph obs["profile: observability"]
         P[prometheus :9090] --> G[grafana :3000]
+        RX[redis-exporter] --> P
+        PX[postgres-exporter] --> P
     end
     subgraph ml["profile: mlflow"]
         MF[mlflow :5000]
@@ -27,6 +29,8 @@ flowchart LR
     FC --- K & R
     SW --- K
     MF --- PG
+    RX --- R
+    PX --- PG
     P -.scrapes.-> API & RL & FC & SW & K
 ```
 
@@ -50,7 +54,7 @@ only the profiles you need.
 docker compose build                                   # the riskstream image (api, workers, jobs, mlflow)
 
 docker compose --profile app up -d                     # infrastructure + application
-docker compose --profile observability up -d           # + Prometheus, Grafana
+docker compose --profile observability up -d           # + Prometheus, Redis/PostgreSQL exporters, Grafana
 docker compose --profile mlflow up -d                  # + MLflow tracking server / registry
 docker compose --profile app --profile observability --profile mlflow ps
 
@@ -71,6 +75,7 @@ because every service port is published on `127.0.0.1`. See `docs/streaming.md`.
 | http://127.0.0.1:8000/docs | API (key in `secrets/demo_api_key.txt`) |
 | http://127.0.0.1:8000/health/ready | readiness incl. online features |
 | http://127.0.0.1:9090/targets | Prometheus scrape targets |
+| http://127.0.0.1:9090/alerts | alert rules and their state |
 | http://127.0.0.1:3000 | Grafana (user `admin`, password `GRAFANA_ADMIN_PASSWORD` in `.env`) |
 | http://127.0.0.1:5000 | MLflow |
 
@@ -107,7 +112,7 @@ starting a second rebuild.
   not published.
 * Memory limits: `api` 768m, `feature-consumer` 1536m (the bootstrap runs
   there), the other workers 384m, `mlflow` 768m, `prometheus` and `grafana`
-  384m each.
+  384m each, `redis-exporter` and `postgres-exporter` 64m each.
 * MLflow runs with `MLFLOW_SERVER_ENABLE_JOB_EXECUTION=false`. With MLflow's
   job runner enabled, the container started about 9 extra Python processes
   and was OOM-killed (exit 137) at both a 512 MB and a 1 GB limit. Without it,
@@ -147,7 +152,27 @@ with `python -m mlflow ui --backend-store-uri sqlite:///mlflow.db --port 5001`.
 
 ## Prometheus and Grafana
 
-Prometheus scrapes the API, the three workers and Redpanda every 15 s
-(`infrastructure/prometheus/prometheus.yml`) and keeps 7 days of data. Grafana
-is provisioned with the Prometheus data source. Dashboards and alert rules are
-Phase 6. Redis and PostgreSQL exporters are not added yet.
+Prometheus scrapes the API, the three workers, Redpanda, redis-exporter and
+postgres-exporter every 15 s (`infrastructure/prometheus/prometheus.yml`), evaluates
+`infrastructure/prometheus/alerts.yml` and keeps 7 days of data. Grafana is provisioned
+with the Prometheus data source and three dashboards in the folder RiskStream.
+Details, alerts and measured results: [monitoring.md](monitoring.md). Runbooks:
+[incident_runbooks.md](incident_runbooks.md).
+
+**Existing PostgreSQL volume (created before Phase 6):** the init script only runs on an
+empty volume, so create the monitor role once by hand. Set `RISKSTREAM_MONITOR_PASSWORD`
+in `.env` first, then:
+
+```powershell
+docker compose exec postgres sh -c 'psql -U postgres -d postgres -v ON_ERROR_STOP=1 -v owner_password=x -v app_password=x -v monitor_password="$RISKSTREAM_MONITOR_PASSWORD" -f /riskstream/roles.sql'
+```
+
+`roles.sql` is idempotent: existing roles are not recreated (their passwords are not
+changed), and the grants are re-applied. `postgres` must have been recreated after
+`RISKSTREAM_MONITOR_PASSWORD` was added to `.env` (`docker compose up -d postgres`) so
+the variable is set inside the container.
+
+Measured with all profiles up (2026-11-23): about 1.6 GB across 12 containers
+(mlflow 397 MB, redis 245 MB, api 219 MB, redpanda 160 MB, postgres 140 MB,
+grafana 109 MB, relay 106 MB, prometheus 75 MB, scoring-worker 70 MB,
+feature-consumer 64 MB, each exporter about 11 MB).

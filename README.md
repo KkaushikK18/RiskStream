@@ -178,6 +178,15 @@ single-client numbers, not load-test results (Phase 9).
 | serving parity, steps 598-599, rolled back, run twice | 2,750 transactions each run, 0 mismatches, identical probabilities; database row counts unchanged after both runs |
 | HTTP demo, step 598 (934 transactions, one client) | 930 APPROVE, 4 DECLINE; the 4 declines are the hour's 4 fraud rows; client-side p50 39 ms, p95 89 ms, p99 124 ms |
 
+## Monitoring (Phase 6)
+
+`docker compose --profile app --profile observability up -d` starts Prometheus (with 22
+alert rules, unit-tested with promtool), Redis and PostgreSQL exporters, and Grafana with
+three generated dashboards: API & Infrastructure, Streaming & Online Features, Model Serving.
+Every alert links to a section of [docs/incident_runbooks.md](docs/incident_runbooks.md).
+`python scripts/check_dashboards.py` runs every panel query against the live Prometheus.
+Details and measured results: [docs/monitoring.md](docs/monitoring.md).
+
 ## Datasets
 
 **PaySim** ([Kaggle](https://www.kaggle.com/datasets/ealaxi/paysim1)): download
@@ -252,7 +261,7 @@ is not guaranteed to be bit-identical across machines.
 ## Tests
 
 ```powershell
-python -m pytest tests -q                # all tests, ~40 s
+python -m pytest tests -q                # 232 tests, ~2.5 min (integration tests skip unless RISKSTREAM_TEST_* are set)
 python -m pytest tests -q -m "not slow"  # skip the end-to-end training test
 python -m ruff check src tests
 ```
@@ -290,7 +299,7 @@ data/, reports/, models/, mlruns/   generated (git-ignored)
 | 3 | FastAPI inference service, PostgreSQL, decision policy | done |
 | 4 | Redis online features, Redpanda streaming, outbox relay, replay, DLQ | done ([docs/streaming.md](docs/streaming.md)) |
 | 5 | Docker Compose environment: app image, API + workers as containers, MLflow, Prometheus, Grafana | done ([docs/local_environment.md](docs/local_environment.md)) |
-| 6 | Prometheus, Grafana, alerting | pending |
+| 6 | Prometheus rules and alerts, Redis/PostgreSQL exporters, Grafana dashboards, runbooks | done ([docs/monitoring.md](docs/monitoring.md)) |
 | 7 | drift, delayed labels, retraining with Prefect, champion/challenger | pending |
 | 8 | shadow and canary deployment, rollback | pending |
 | 9 | load testing, scaling, failure injection | pending |

@@ -80,10 +80,35 @@ def ready(request: Request, response: Response) -> ReadinessResponse:
                              policy_version=model.policy.policy_version if model else None, dependencies=deps)
 
 
+FRESHNESS_REASONS = ("ok", "not_bootstrapped", "layout_mismatch", "relay_heartbeat_stale",
+                     "consumer_heartbeat_stale", "consumer_not_running", "relay_backlog", "consumer_lag",
+                     "consumer_stalled", "redis_unavailable", "not_configured")
+
+
+def _update_online_store_gauges(request: Request) -> None:
+    """Freshness verdict as metrics (one HMGET per scrape), so dashboards and alerts
+    see exactly what the scoring path decides."""
+    state = request.app.state
+    if state.stream_cfg.serving_feature_source != "redis":
+        return
+    reason = "not_configured"
+    if state.feature_store is not None:
+        try:
+            reason = assess_freshness(state.feature_store.read_meta(), state.stream_cfg).reason
+        except FeatureStoreError:
+            reason = "redis_unavailable"
+            metrics.ONLINE_STORE_CHECK_ERRORS.inc()
+    metrics.ONLINE_STORE_USABLE.set(1 if reason == "ok" else 0)
+    for r in FRESHNESS_REASONS:  # fixed label set: no stale series, no cardinality growth
+        metrics.ONLINE_STORE_STATE.labels(r).set(1 if r == reason else 0)
+
+
 @router.get("/metrics", include_in_schema=False)
 def prometheus_metrics(request: Request) -> Response:
     engine = request.app.state.engine
     if engine is not None and hasattr(engine.pool, "checkedout"):
         metrics.DB_POOL_IN_USE.set(engine.pool.checkedout())
         metrics.DB_POOL_SIZE.set(engine.pool.size())
+        metrics.DB_POOL_CAPACITY.set(engine.pool.size() + max(0, getattr(engine.pool, "_max_overflow", 0)))
+    _update_online_store_gauges(request)
     return Response(generate_latest(), media_type=CONTENT_TYPE_LATEST)

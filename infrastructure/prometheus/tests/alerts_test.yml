@@ -1,0 +1,389 @@
+# promtool unit tests for alerts.yml. Run:
+#   docker run --rm -v "${PWD}/infrastructure/prometheus:/p" --entrypoint promtool prom/prometheus:v3.5.0 test rules /p/tests/alerts_test.yml
+# (python -m pytest tests/unit/test_observability_config.py runs it too.)
+rule_files:
+- ../alerts.yml
+evaluation_interval: 15s
+tests:
+- name: service down fires after 1 minute, not before
+  interval: 15s
+  input_series:
+  - series: up{job="api", instance="api:8000", tier="app"}
+    values: 1 1 0 0 0 0 0 0
+  - series: up{job="redis", instance="redis-exporter:9121", tier="infra"}
+    values: 1x8
+  alert_rule_test:
+  - eval_time: 45s
+    alertname: ServiceDown
+    exp_alerts: []
+  - eval_time: 1m45s
+    alertname: ServiceDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: api
+        instance: api:8000
+        tier: app
+      exp_annotations:
+        summary: api is not reachable by Prometheus
+        description: Scrapes of api:8000 have failed for 1 minute.
+        runbook_url: docs/incident_runbooks.md#servicedown
+  - eval_time: 1m45s
+    alertname: InfraExporterDown
+    exp_alerts: []
+- name: postgres, redis, model
+  interval: 15s
+  input_series:
+  - series: pg_up{job="postgres"}
+    values: '0x8'
+  - series: redis_up{job="redis"}
+    values: 1 1 1 1 0 0 0 0 0
+  - series: riskstream_model_loaded{job="api", instance="api:8000"}
+    values: 1x8
+  alert_rule_test:
+  - eval_time: 1m15s
+    alertname: PostgresDown
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: postgres
+      exp_annotations:
+        summary: 'PostgreSQL is down: scoring is failing closed (503)'
+        description: postgres_exporter cannot connect. The API returns 503 for every score request.
+        runbook_url: docs/incident_runbooks.md#postgresdown
+  - eval_time: 1m15s
+    alertname: RedisDown
+    exp_alerts: []
+  # redis_up 0 from 1m, for: 1m -> fires at 2m; checked at 2m30s (off the boundary)
+  - eval_time: 2m30s
+    alertname: RedisDown
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: redis
+      exp_annotations:
+        summary: 'Redis is down: scoring uses PostgreSQL features, feature updates are blocked'
+        description: Scoring continues (slower). The feature consumer is retrying and will rebuild the store when Redis returns.
+        runbook_url: docs/incident_runbooks.md#redisdown
+  - eval_time: 2m
+    alertname: ModelNotLoaded
+    exp_alerts: []
+- name: error rate needs both a high ratio and real traffic
+  interval: 1m
+  input_series:
+  - series: riskstream_http_requests_total{route="/v1/score", status="201"}
+    values: 0+600x15
+  - series: riskstream_http_requests_total{route="/v1/score", status="503"}
+    values: 0+60x15
+  - series: riskstream_http_requests_total{route="/health/ready", status="503"}
+    values: 0+6000x15
+  alert_rule_test:
+  # condition true from 1m (first rate), for: 5m -> fires at 6m; 4m is safely before
+  - eval_time: 4m
+    alertname: ApiHighErrorRate
+    exp_alerts: []
+  - eval_time: 12m
+    alertname: ApiHighErrorRate
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: 9.091% of /v1 requests fail with 5xx
+        description: More than 5% of API requests returned 5xx for 5 minutes.
+        runbook_url: docs/incident_runbooks.md#apihigherrorrate
+- name: a single failed request on an idle API is not an incident
+  interval: 1m
+  input_series:
+  - series: riskstream_http_requests_total{route="/v1/score", status="500"}
+    values: 0+1x15
+  alert_rule_test:
+  - eval_time: 14m
+    alertname: ApiHighErrorRate
+    exp_alerts: []
+- name: latency p95 above 250 ms for 10 minutes
+  interval: 1m
+  input_series:
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="0.25"}
+    values: '0x25'
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="0.5"}
+    values: 0+100x25
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="+Inf"}
+    values: 0+100x25
+  alert_rule_test:
+  - eval_time: 10m
+    alertname: ApiHighLatency
+    exp_alerts: []
+  - eval_time: 20m
+    alertname: ApiHighLatency
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: /v1/score p95 is 487.5ms
+        description: p95 above 250 ms for 10 minutes (measured baseline ~40 ms).
+        runbook_url: docs/incident_runbooks.md#apihighlatency
+- name: load shedding and database errors fire immediately
+  interval: 1m
+  input_series:
+  - series: riskstream_load_shed_total{job="api", instance="api:8000"}
+    values: 0 0 5 5 5 5 5 5 5 5
+  - series: riskstream_dependency_errors_total{job="api", instance="api:8000", dependency="database"}
+    values: 0 0 0 2 2 2 2 2 2 2
+  - series: riskstream_dependency_errors_total{job="api", instance="api:8000", dependency="redis"}
+    values: 0 9 18 27 36 45 54 63 72 81
+  alert_rule_test:
+  - eval_time: 3m
+    alertname: ApiLoadShedding
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: api
+        instance: api:8000
+      exp_annotations:
+        summary: API is rejecting requests at its in-flight limit
+        description: 5 requests shed with 503 in the last 5 minutes.
+        runbook_url: docs/incident_runbooks.md#apiloadshedding
+  - eval_time: 4m
+    alertname: DatabaseErrors
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: api
+        instance: api:8000
+        dependency: database
+      exp_annotations:
+        summary: API database calls are failing
+        description: 2 database errors on api:8000 in 5 minutes.
+        runbook_url: docs/incident_runbooks.md#databaseerrors
+  - eval_time: 9m
+    alertname: ApiLoadShedding
+    exp_alerts: []
+- name: connection pool saturation
+  interval: 1m
+  input_series:
+  - series: riskstream_db_pool_checked_out{instance="api:8000"}
+    values: 16x10
+  - series: riskstream_db_pool_capacity{instance="api:8000"}
+    values: 16x10
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: DbPoolSaturated
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: api:8000
+      exp_annotations:
+        summary: API connection pool is over 90% in use
+        description: Requests will start waiting for connections and time out after 2 s.
+        runbook_url: docs/incident_runbooks.md#dbpoolsaturated
+- name: online store unusable only after 10 minutes (a rebuild takes ~3.5)
+  interval: 1m
+  input_series:
+  - series: riskstream_online_store_usable{instance="api:8000"}
+    values: 0 0 0 0 1 0x12
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: OnlineStoreUnusable
+    exp_alerts: []
+  - eval_time: 14m
+    alertname: OnlineStoreUnusable
+    exp_alerts: []
+  - eval_time: 16m
+    alertname: OnlineStoreUnusable
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        instance: api:8000
+      exp_annotations:
+        summary: Redis features not used for 10 minutes
+        description: A rebuild takes ~3.5 min; 10 min means it is stuck or the pipeline is unhealthy. See riskstream_online_store_state
+          for the reason.
+        runbook_url: docs/incident_runbooks.md#onlinestoreunusable
+- name: fallback ratio
+  interval: 1m
+  input_series:
+  - series: riskstream_feature_source_total{source="redis"}
+    values: 0+60x30
+  - series: riskstream_feature_source_total{source="postgres_fallback"}
+    values: 0+60x30
+  alert_rule_test:
+  - eval_time: 25m
+    alertname: FeatureFallbackHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: 50% of requests use PostgreSQL fallback features
+        description: Latency is higher than normal; check riskstream_feature_fallbacks_total by reason.
+        runbook_url: docs/incident_runbooks.md#featurefallbackhigh
+- name: consumer blocked, stalled, lagging
+  interval: 1m
+  input_series:
+  - series: riskstream_consumer_blocked{consumer="feature-updater", job="feature-consumer"}
+    values: 0 1 1 1 1 1
+  - series: riskstream_feature_consumer_stalled_seconds{job="outbox-relay"}
+    values: 0 30 90 150 210 270
+  - series: riskstream_consumer_lag_messages{consumer="scoring-worker", partition="0"}
+    values: 600x10
+  - series: riskstream_consumer_lag_messages{consumer="scoring-worker", partition="1"}
+    values: 600x10
+  - series: riskstream_consumer_lag_messages{consumer="feature-updater", partition="0"}
+    values: 900x10
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: ConsumerBlocked
+    exp_alerts: []
+  - eval_time: 4m
+    alertname: ConsumerBlocked
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        consumer: feature-updater
+      exp_annotations:
+        summary: feature-updater is blocked on a transient error
+        description: It retries the same message without skipping; lag grows until the dependency recovers.
+        runbook_url: docs/incident_runbooks.md#consumerblocked
+  - eval_time: 4m
+    alertname: FeatureConsumerStalled
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: outbox-relay
+      exp_annotations:
+        summary: feature consumer has made no progress for 3m 30s while lagging
+        description: Measured from the broker by the relay, so it works even if the consumer is dead.
+        runbook_url: docs/incident_runbooks.md#featureconsumerstalled
+  - eval_time: 6m
+    alertname: ConsumerLagHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        consumer: scoring-worker
+      exp_annotations:
+        summary: scoring-worker lag is 1.2k messages
+        description: Above 1000 the API stops using Redis features (freshness rule).
+        runbook_url: docs/incident_runbooks.md#consumerlaghigh
+- name: outbox backlog and dead letters
+  interval: 1m
+  input_series:
+  - series: riskstream_outbox_oldest_unpublished_age_seconds{job="outbox-relay"}
+    values: 0 70 130 190 250
+  - series: riskstream_dlq_messages_total{consumer="feature-updater", error_class="PermanentError"}
+    values: 0 0 1 1 1
+  alert_rule_test:
+  - eval_time: 4m
+    alertname: OutboxBacklogStale
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+        job: outbox-relay
+      exp_annotations:
+        summary: oldest unpublished outbox event is 4m 10s old
+        description: The relay is not publishing; downstream features and monitoring are falling behind.
+        runbook_url: docs/incident_runbooks.md#outboxbacklogstale
+  - eval_time: 3m
+    alertname: DeadLetters
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        consumer: feature-updater
+        error_class: PermanentError
+      exp_annotations:
+        summary: feature-updater dead-lettered 1 message(s)
+        description: 'Inspect with: python -m riskstream.cli dlq-inspect'
+        runbook_url: docs/incident_runbooks.md#deadletters
+- name: postgres connections and redis memory
+  interval: 1m
+  input_series:
+  - series: pg_stat_activity_count{datname="riskstream", state="active"}
+    values: 50x12
+  - series: pg_stat_activity_count{datname="riskstream", state="idle"}
+    values: 35x12
+  - series: pg_settings_max_connections
+    values: 100x12
+  - series: redis_memory_used_bytes
+    values: 600e6x12
+  - series: redis_memory_max_bytes
+    values: 671088640x12
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: PostgresConnectionsHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: PostgreSQL at 85% of max_connections
+        description: New connections will be refused when the limit is reached.
+        runbook_url: docs/incident_runbooks.md#postgresconnectionshigh
+  - eval_time: 11m
+    alertname: RedisMemoryHigh
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Redis at 89.41% of maxmemory
+        description: 'Policy is noeviction: at 100% feature writes fail and the consumer blocks.'
+        runbook_url: docs/incident_runbooks.md#redismemoryhigh
+- name: redis without a maxmemory limit never alerts
+  interval: 1m
+  input_series:
+  - series: redis_memory_used_bytes
+    values: 9e9x12
+  - series: redis_memory_max_bytes
+    values: '0x12'
+  alert_rule_test:
+  - eval_time: 11m
+    alertname: RedisMemoryHigh
+    exp_alerts: []
+- name: process memory near container limit
+  interval: 1m
+  input_series:
+  - series: process_resident_memory_bytes{job="api"}
+    values: 700e6x8
+  - series: process_resident_memory_bytes{job="feature-consumer"}
+    values: 851e6x8
+  - series: process_resident_memory_bytes{job="scoring-worker"}
+    values: 40e6x8
+  alert_rule_test:
+  - eval_time: 6m
+    alertname: ProcessMemoryNearLimit
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+        job: api
+      exp_annotations:
+        summary: api uses 667.6MiB, close to its container limit
+        description: The container will be OOM-killed (exit 137) at its limit.
+        runbook_url: docs/incident_runbooks.md#processmemorynearlimit
+- name: redpanda partitions and disk
+  interval: 1m
+  input_series:
+  - series: redpanda_cluster_unavailable_partitions{instance="redpanda:9644", job="redpanda"}
+    values: 0 0 2 2 2 2 2
+  - series: redpanda_storage_disk_free_space_alert{instance="redpanda:9644", job="redpanda"}
+    values: 0 1 1 1 1 1 1 1 1
+  alert_rule_test:
+  - eval_time: 2m
+    alertname: RedpandaUnavailablePartitions
+    exp_alerts: []
+  - eval_time: 3m
+    alertname: RedpandaUnavailablePartitions
+    exp_alerts:
+    - exp_labels:
+        severity: critical
+      exp_annotations:
+        summary: 2 Redpanda partition(s) unavailable
+        description: Producers and consumers on those partitions are stuck.
+        runbook_url: docs/incident_runbooks.md#redpandaunavailablepartitions
+  - eval_time: 5m
+    alertname: RedpandaDiskLow
+    exp_alerts: []
+  - eval_time: 6m
+    alertname: RedpandaDiskLow
+    exp_alerts:
+    - exp_labels:
+        severity: warning
+      exp_annotations:
+        summary: Redpanda reports low disk space
+        description: When the disk fills, producers are rejected.
+        runbook_url: docs/incident_runbooks.md#redpandadisklow

@@ -44,6 +44,13 @@ LABELS = Counter("riskstream_labels_total", "Labels recorded", ["source", "is_fr
 DEPENDENCY_ERRORS = Counter("riskstream_dependency_errors_total", "Failed calls to dependencies", ["dependency"])
 DB_POOL_IN_USE = Gauge("riskstream_db_pool_checked_out", "Database connections currently checked out")
 DB_POOL_SIZE = Gauge("riskstream_db_pool_size", "Configured database pool size (excluding overflow)")
+DB_POOL_CAPACITY = Gauge("riskstream_db_pool_capacity", "Maximum connections this process can hold (pool + overflow)")
+ONLINE_STORE_USABLE = Gauge("riskstream_online_store_usable",
+                            "1 when the API may serve Redis features (freshness checks pass), else 0")
+ONLINE_STORE_STATE = Gauge("riskstream_online_store_state",
+                           "Current online-store freshness verdict (value 1 on the active reason)", ["reason"])
+ONLINE_STORE_CHECK_ERRORS = Counter("riskstream_online_store_check_errors_total",
+                                    "Failed online-store freshness checks during /metrics scrapes")
 MODEL_LOADED = Gauge("riskstream_model_loaded", "1 when a valid model and policy are loaded")
 FEATURE_SOURCE = Counter("riskstream_feature_source_total", "Feature primitives served per source",
                          ["source"])  # redis | postgres | postgres_fallback

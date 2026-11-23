@@ -10,6 +10,11 @@ SELECT format('CREATE ROLE riskstream_owner LOGIN PASSWORD %L', :'owner_password
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'riskstream_owner') \gexec
 SELECT format('CREATE ROLE riskstream_app LOGIN PASSWORD %L', :'app_password')
 WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'riskstream_app') \gexec
+-- riskstream_monitor : used by postgres_exporter (Phase 6). pg_monitor lets it read
+-- statistics views (pg_stat_*) but grants no access to table contents.
+SELECT format('CREATE ROLE riskstream_monitor LOGIN PASSWORD %L CONNECTION LIMIT 3', :'monitor_password')
+WHERE NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'riskstream_monitor') \gexec
+GRANT pg_monitor TO riskstream_monitor;
 
 SELECT 'CREATE DATABASE riskstream OWNER riskstream_owner'
 WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname = 'riskstream') \gexec
@@ -23,6 +28,8 @@ REVOKE ALL ON DATABASE mlflow FROM PUBLIC;
 \connect riskstream
 REVOKE ALL ON DATABASE riskstream FROM PUBLIC;
 GRANT CONNECT ON DATABASE riskstream TO riskstream_app;
+-- PUBLIC lost CONNECT above, so the monitor role needs it explicitly (statistics only).
+GRANT CONNECT ON DATABASE riskstream TO riskstream_monitor;
 GRANT USAGE ON SCHEMA public TO riskstream_app;
 ALTER DEFAULT PRIVILEGES FOR ROLE riskstream_owner IN SCHEMA public
     GRANT SELECT, INSERT, UPDATE ON TABLES TO riskstream_app;

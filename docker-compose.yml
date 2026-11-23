@@ -3,7 +3,7 @@
 # Profiles (start only what you need; the laptop has little free RAM):
 #   (none)          postgres, redis, redpanda              infrastructure only
 #   app             + migrate, api, relay, feature-consumer, scoring-worker
-#   observability   + prometheus, grafana
+#   observability   + prometheus, redis-exporter, postgres-exporter, grafana
 #   mlflow          + mlflow tracking server / model registry
 #
 #   docker compose build
@@ -48,6 +48,7 @@ services:
       POSTGRES_PASSWORD: ${POSTGRES_SUPERUSER_PASSWORD:?set POSTGRES_SUPERUSER_PASSWORD in .env}
       RISKSTREAM_OWNER_PASSWORD: ${RISKSTREAM_OWNER_PASSWORD:?set RISKSTREAM_OWNER_PASSWORD in .env}
       RISKSTREAM_APP_PASSWORD: ${RISKSTREAM_APP_PASSWORD:?set RISKSTREAM_APP_PASSWORD in .env}
+      RISKSTREAM_MONITOR_PASSWORD: ${RISKSTREAM_MONITOR_PASSWORD:-}
     command: [postgres, -c, shared_buffers=128MB, -c, max_connections=100, -c, log_min_duration_statement=250]
     ports: ["127.0.0.1:5433:5432"]   # 5433 avoids a locally installed PostgreSQL on 5432
     volumes:
@@ -106,6 +107,7 @@ services:
     <<: *app
     profiles: [app]
     restart: "no"
+    environment: {<<: *app-env, SERVICE_NAME: migrate}
     command: ["sh", "-c", "python -m riskstream.cli db-upgrade && python -m riskstream.cli topics-create"]
     depends_on:
       postgres: {condition: service_healthy}
@@ -118,6 +120,7 @@ services:
     environment:
       <<: *app-env
       INSTANCE_ID: api-1
+      SERVICE_NAME: api
       API_KEYS: ${API_KEYS}
     command: ["python", "-m", "riskstream.cli", "serve", "--host", "0.0.0.0", "--port", "8000"]
     ports: ["127.0.0.1:8000:8000"]
@@ -136,7 +139,7 @@ services:
   relay:
     <<: *app
     profiles: [app]
-    environment: {<<: *app-env, INSTANCE_ID: relay-1, METRICS_PORT: "9101"}
+    environment: {<<: *app-env, INSTANCE_ID: relay-1, SERVICE_NAME: outbox-relay, METRICS_PORT: "9101"}
     command: ["python", "-m", "riskstream.cli", "run-relay", "--metrics-port", "9101"]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -154,7 +157,7 @@ services:
   feature-consumer:
     <<: *app
     profiles: [app]
-    environment: {<<: *app-env, INSTANCE_ID: feature-consumer-1, METRICS_PORT: "9102"}
+    environment: {<<: *app-env, INSTANCE_ID: feature-consumer-1, SERVICE_NAME: feature-consumer, METRICS_PORT: "9102"}
     command: ["sh", "-c", "python -m riskstream.cli online-bootstrap --if-needed && exec python -m riskstream.cli run-feature-consumer --metrics-port 9102 --exit-on-store-lost"]
     depends_on:
       migrate: {condition: service_completed_successfully}
@@ -168,7 +171,7 @@ services:
   scoring-worker:
     <<: *app
     profiles: [app]
-    environment: {<<: *app-env, INSTANCE_ID: scoring-worker-1, METRICS_PORT: "9103", WORKER_API_KEY: "${WORKER_API_KEY}"}
+    environment: {<<: *app-env, INSTANCE_ID: scoring-worker-1, SERVICE_NAME: scoring-worker, METRICS_PORT: "9103", WORKER_API_KEY: "${WORKER_API_KEY}"}
     command: ["python", "-m", "riskstream.cli", "run-scoring-worker", "--metrics-port", "9103"]
     depends_on:
       api: {condition: service_healthy}
@@ -215,6 +218,7 @@ services:
     ports: ["127.0.0.1:9090:9090"]
     volumes:
       - ./infrastructure/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./infrastructure/prometheus/alerts.yml:/etc/prometheus/alerts.yml:ro
       - prometheus:/prometheus
     healthcheck:
       test: ["CMD", "wget", "-q", "-O", "-", "http://127.0.0.1:9090/-/ready"]
@@ -222,6 +226,37 @@ services:
       timeout: 5s
       retries: 5
     deploy: {resources: {limits: {memory: 384m}}}
+    restart: unless-stopped
+
+  # Redis server metrics: up, memory vs maxmemory, ops/s, clients, command latency.
+  redis-exporter:
+    image: oliver006/redis_exporter:v1.67.0
+    profiles: [observability]
+    environment:
+      REDIS_ADDR: redis://redis:6379
+      REDIS_PASSWORD: ${REDIS_PASSWORD}
+      REDIS_EXPORTER_INCL_SYSTEM_METRICS: "true"
+      # Below Prometheus' 5 s scrape timeout: a hung Redis must report redis_up=0,
+      # not make the whole scrape time out (which would hide RedisDown).
+      REDIS_EXPORTER_CONNECTION_TIMEOUT: 2s
+    depends_on:
+      redis: {condition: service_healthy}
+    deploy: {resources: {limits: {memory: 64m}}}
+    restart: unless-stopped
+
+  # PostgreSQL metrics: up, connections by state vs max_connections, transactions,
+  # locks, database size. Connects as riskstream_monitor (pg_monitor, no data access).
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.17.1
+    profiles: [observability]
+    environment:
+      # connect_timeout below the 5 s scrape timeout, for the same reason as redis-exporter.
+      DATA_SOURCE_URI: postgres:5432/riskstream?sslmode=disable&connect_timeout=2
+      DATA_SOURCE_USER: riskstream_monitor
+      DATA_SOURCE_PASS: ${RISKSTREAM_MONITOR_PASSWORD:?set RISKSTREAM_MONITOR_PASSWORD in .env}
+    depends_on:
+      postgres: {condition: service_healthy}
+    deploy: {resources: {limits: {memory: 64m}}}
     restart: unless-stopped
 
   grafana:
@@ -236,6 +271,7 @@ services:
     ports: ["127.0.0.1:3000:3000"]
     volumes:
       - ./infrastructure/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./infrastructure/grafana/dashboards:/etc/grafana/dashboards:ro
       - grafana:/var/lib/grafana
     depends_on:
       prometheus: {condition: service_healthy}
