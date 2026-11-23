@@ -9,7 +9,6 @@ import math
 import os
 import threading
 import time
-import uuid
 
 import polars as pl
 import pytest
@@ -24,8 +23,9 @@ WINDOWS = (24, 168)
 def store():
     from riskstream.config import StreamingConfig
     from riskstream.features.online_store import RedisFeatureStore
+    from tests.integration.leftovers import namespace, new_tag
 
-    cfg = StreamingConfig.load(namespace=f"rs:test:{uuid.uuid4().hex[:8]}", stat_buckets=64)
+    cfg = StreamingConfig.load(namespace=namespace(new_tag()), stat_buckets=64)
     s = RedisFeatureStore.from_url(URL, cfg, WINDOWS)
     yield s
     s.clear_namespace()

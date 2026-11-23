@@ -44,7 +44,6 @@ docker compose logs -f feature-consumer
    ```powershell
    python -m riskstream.cli online-bootstrap
    ```
-
 ---
 
 ## Q: Why did a cold start with an empty Redis take about 9 minutes?
@@ -157,20 +156,43 @@ above).
 |---|---|---|---|
 | 1 | The first faster version ran out of memory in the container: it built commands for all 6.26M origin accounts at once, and Linux killed it at the 1.5 GB limit. | **Fixed.** Commands are built in 8 groups. | Real rebuild in the container: peak 851 MB of 1.5 GB, 0 restarts, not killed. |
 | 2 | A killed rebuild blocked recovery for up to 30 minutes: the dead process kept its lock for the full 30-minute expiry, so the restarted container waited. | **Fixed.** The lock expires after 30 s and is renewed every 10 s while a rebuild runs. | Two new tests: a dead process's lock expires and the next rebuild proceeds; a long rebuild keeps its lock. |
-| 3 | 34 leftover test topics from killed test runs filled Redpanda's partition limit, so a Kafka test hung instead of failing. | **Fixed for the hang.** Topics deleted; the test now fails immediately with a clear message if topics can't be created. | Full suite: 192 passed in 2 min 24 s, no hang. |
+| 3 | 34 leftover test topics filled Redpanda's partition limit, so a Kafka test hung instead of failing. | **Fully fixed.** Fast failure with a clear message, the per-run topic leak fixed, and automatic safe cleanup of killed runs (details below). | Two full runs: 209 passed, 0 topics left; killed-run leftovers removed automatically. |
 
-### What remains for problem 3
+### Problem 3, fully fixed: automatic leftover cleanup
 
-If a test run is killed partway through (Ctrl+C or a crash), its cleanup never
-runs and its topics stay in Redpanda. After about 30 such runs the partition
-limit fills again. A normal test run cleans up after itself.
+**What it is.** Kafka integration tests create temporary topics (and Redis test
+keys) and delete them at the end. A run killed partway through (Ctrl+C, crash)
+skipped that cleanup, and the leftovers piled up until Redpanda's partition
+limit was full (it holds roughly 8 test runs' worth on this single-core broker).
 
-Cleanup if it happens:
+**A second cause, found while fixing it.** Even *normal* runs were leaking
+12 topics each. The test deleted its topics with an `AdminClient` that was
+garbage-collected before the delete request reached the broker. This is why the
+partition limit filled up so fast. Fixed by keeping the client alive and
+waiting for each delete to finish.
 
-```powershell
-$t = docker exec riskstream-redpanda-1 rpk topic list | ForEach-Object { ($_ -split "\s+")[0] } | Where-Object { $_ -like "test.*" }
-if ($t) { docker exec riskstream-redpanda-1 rpk topic delete @t }
-```
+**How it works now.** Before integration tests start, a cleanup step
+(`tests/integration/conftest.py` + `leftovers.py`) deletes leftovers from killed
+runs. Safety rules, each of which alone protects real data:
 
-Possible improvement (about 5 lines): the test setup deletes leftover `test.*`
-topics before each run. Planned for when the tests are touched again in Phase 6.
+1. **Exact names only.** Test topics are named
+   `test.<unix seconds>.<8 hex>.<kind>`, test Redis keys `rs:test:<unix seconds>:<8 hex>:…`.
+   Real `transactions.*` topics and the real `rs:v1:*` keys can never match;
+   look-alike names (e.g. `test.foo`) are left alone.
+2. **Age guard.** Only leftovers older than 10 minutes are deleted (the time is in
+   the name), so a test run still in progress in another terminal is never touched.
+3. **Redis database 0 is refused** outright: that is the real online store.
+
+Cleanup failures only produce a warning; they never hide real test results.
+
+**Verified.**
+
+| check | result |
+|---|---|
+| 16 safety unit tests (real names never selected, look-alikes, newline trick, db 0 refused) | pass (one caught a real bug: `$` in a regex also matched a name ending in a newline; fixed with `fullmatch`) |
+| two full test runs in a row | 209 passed each, **0 test topics left** (before: 12 leaked per run) |
+| test run killed with `Stop-Process -Force` | left 4 topics + 134 Redis keys |
+| next run immediately after | left them alone (younger than 10 min) |
+| next run after 10 minutes | deleted all 4 topics and 134 keys; the 4 real `transactions.*` topics and the 318,783 real store keys untouched |
+
+No manual cleanup command is needed any more.

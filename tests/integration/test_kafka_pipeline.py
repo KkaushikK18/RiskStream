@@ -27,25 +27,42 @@ def env(small_canonical):
     from riskstream.features.online_bootstrap import bootstrap
     from riskstream.features.online_store import RedisFeatureStore
     from riskstream.streaming.kafka import ensure_topics
+    from tests.integration.leftovers import namespace, new_tag, topic_names
 
-    tag = uuid.uuid4().hex[:8]
-    cfg = StreamingConfig.load(namespace=f"rs:test:{tag}", stat_buckets=64, partitions=3,
-                               topic_scored=f"test.{tag}.scored", topic_dlq=f"test.{tag}.dlq",
-                               topic_ingested=f"test.{tag}.ingested", topic_labeled=f"test.{tag}.labeled",
+    tag = new_tag()  # "<unix seconds>.<hex>": lets the leftover cleanup tell old from in-progress
+    topics = topic_names(tag)
+    cfg = StreamingConfig.load(namespace=namespace(tag), stat_buckets=64, partitions=3,
+                               topic_scored=topics["scored"], topic_dlq=topics["dlq"],
+                               topic_ingested=topics["ingested"], topic_labeled=topics["labeled"],
                                max_attempts=2, backoff_initial_s=0.05, pause_on_failure_s=0.1)
     created = ensure_topics(KAFKA, cfg)
-    # Fail fast instead of hanging on a topic that was never created (e.g. the broker's
-    # partition limit was reached by topics left over from killed test runs).
+    # Fail fast instead of hanging on a topic that was never created (the broker's
+    # partition limit: ~8 test runs' worth of topics on this single-core dev broker).
     bad = {t: s for t, s in created.items() if s.startswith("error")}
-    assert not bad, f"topic creation failed: {bad}. Delete leftover test.* topics: rpk topic list"
-    store = RedisFeatureStore.from_url(REDIS, cfg, (24, 168))
-    bootstrap(store, frame=small_canonical.filter(pl.col("step") <= 1))
-    yield cfg, store, tag
-    store.clear_namespace()
-    from confluent_kafka.admin import AdminClient
+    if bad:
+        from confluent_kafka.admin import AdminClient
 
-    AdminClient({"bootstrap.servers": KAFKA}).delete_topics(
-        [cfg.topic_scored, cfg.topic_dlq, cfg.topic_ingested, cfg.topic_labeled])
+        made = [t for t, s in created.items() if s == "created"]
+        if made:
+            admin = AdminClient({"bootstrap.servers": KAFKA})  # keep referenced (see teardown)
+            for fut in admin.delete_topics(made, operation_timeout=20).values():
+                fut.result()
+        pytest.fail(f"topic creation failed: {bad}. Leftover test topics fill the partition limit; "
+                    "see notes in tests/integration/leftovers.py")
+    store = RedisFeatureStore.from_url(REDIS, cfg, (24, 168))
+    try:
+        bootstrap(store, frame=small_canonical.filter(pl.col("step") <= 1))
+        yield cfg, store, tag
+    finally:
+        store.clear_namespace()
+        from confluent_kafka.admin import AdminClient
+
+        # delete_topics() is asynchronous. The client must stay referenced until the
+        # futures resolve: an inline AdminClient(...) is garbage-collected first, its
+        # requests never reach the broker, and the topics leak (measured: 12 per run).
+        admin = AdminClient({"bootstrap.servers": KAFKA})
+        for fut in admin.delete_topics(list(topics.values()), operation_timeout=20).values():
+            fut.result()
 
 
 def scored(i: int, step: int = 10, dest: str = "CK") -> dict:
