@@ -68,7 +68,9 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -141,7 +143,9 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -199,7 +203,9 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -261,7 +267,9 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -303,7 +311,7 @@
     {
       "id": 6,
       "type": "stat",
-      "title": "Scored -> Redis p95",
+      "title": "Scored -> Redis p95 (5m)",
       "description": "",
       "datasource": {
         "type": "prometheus",
@@ -318,17 +326,20 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[5m]))) and on() (sum (increase(riskstream_stream_event_age_seconds_count{}[5m])) >= 20)",
           "legendFormat": "",
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
         "defaults": {
           "unit": "s",
+          "noValue": "no traffic",
           "decimals": 2,
           "thresholds": {
             "mode": "absolute",
@@ -386,7 +397,9 @@
           "datasource": {
             "type": "prometheus",
             "uid": "prometheus"
-          }
+          },
+          "instant": true,
+          "range": false
         }
       ],
       "fieldConfig": {
@@ -474,8 +487,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -535,8 +550,10 @@
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -574,7 +591,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_outbox_batch_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_outbox_batch_seconds_bucket{}[$__rate_interval]))) and on() (sum (increase(riskstream_outbox_batch_seconds_count{}[$__rate_interval])) >= 20)",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -587,8 +604,10 @@
           "unit": "s",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -661,8 +680,10 @@
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -713,8 +734,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -752,7 +775,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.5, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.5, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[$__rate_interval]))) and on() (sum (increase(riskstream_stream_event_age_seconds_count{}[$__rate_interval])) >= 20)",
           "legendFormat": "p50",
           "datasource": {
             "type": "prometheus",
@@ -761,7 +784,7 @@
         },
         {
           "refId": "B",
-          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le) (rate(riskstream_stream_event_age_seconds_bucket{}[$__rate_interval]))) and on() (sum (increase(riskstream_stream_event_age_seconds_count{}[$__rate_interval])) >= 20)",
           "legendFormat": "p95",
           "datasource": {
             "type": "prometheus",
@@ -774,8 +797,10 @@
           "unit": "s",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -813,7 +838,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, consumer) (rate(riskstream_stream_process_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, consumer) (rate(riskstream_stream_process_seconds_bucket{}[$__rate_interval]))) and on(consumer) (sum by (consumer) (increase(riskstream_stream_process_seconds_count{}[$__rate_interval])) >= 20)",
           "legendFormat": "{{consumer}}",
           "datasource": {
             "type": "prometheus",
@@ -826,8 +851,10 @@
           "unit": "s",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -887,8 +914,10 @@
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -939,8 +968,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1004,8 +1035,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 60,
             "stacking": {
               "mode": "normal"
             }
@@ -1056,8 +1089,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1102,6 +1137,7 @@
             "uid": "prometheus"
           },
           "instant": true,
+          "range": false,
           "format": "table"
         }
       ],
@@ -1153,8 +1189,10 @@
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1205,8 +1243,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1279,8 +1319,10 @@
           "unit": "ops",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1318,7 +1360,7 @@
       "targets": [
         {
           "refId": "A",
-          "expr": "histogram_quantile(0.95, sum by (le, redpanda_request) (rate(redpanda_kafka_request_latency_seconds_bucket{}[$__rate_interval])))",
+          "expr": "histogram_quantile(0.95, sum by (le, redpanda_request) (rate(redpanda_kafka_request_latency_seconds_bucket{}[$__rate_interval]))) and on(redpanda_request) (sum by (redpanda_request) (increase(redpanda_kafka_request_latency_seconds_count{}[$__rate_interval])) >= 20)",
           "legendFormat": "{{redpanda_request}}",
           "datasource": {
             "type": "prometheus",
@@ -1331,8 +1373,10 @@
           "unit": "s",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }
@@ -1401,8 +1445,10 @@
           "unit": "short",
           "custom": {
             "lineWidth": 1,
-            "fillOpacity": 10,
             "showPoints": "never",
+            "axisSoftMin": 0,
+            "axisSoftMax": 1,
+            "fillOpacity": 10,
             "stacking": {
               "mode": "none"
             }

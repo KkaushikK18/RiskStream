@@ -76,7 +76,11 @@ groups:
           description: "More than 5% of API requests returned 5xx for 5 minutes."
           runbook_url: docs/incident_runbooks.md#apihigherrorrate
       - alert: ApiHighLatency
-        expr: riskstream:score_latency_seconds:p95_5m > 0.25
+        # Traffic guard (>= 0.1 req/s, i.e. 30 requests per 5 min), as for ApiHighErrorRate:
+        # p95 of a few requests is just the slowest one (one 1.1 s request after idle gave p95 1.9 s).
+        expr: >
+          riskstream:score_latency_seconds:p95_5m > 0.25
+          and on() sum(rate(riskstream_http_request_duration_seconds_count{route="/v1/score"}[5m])) > 0.1
         for: 10m
         labels: {severity: warning}
         annotations:

@@ -261,7 +261,7 @@ is not guaranteed to be bit-identical across machines.
 ## Tests
 
 ```powershell
-python -m pytest tests -q                # 232 tests, ~2.5 min (integration tests skip unless RISKSTREAM_TEST_* are set)
+python -m pytest tests -q                # 238 tests, ~2.5 min (integration tests skip unless RISKSTREAM_TEST_* are set)
 python -m pytest tests -q -m "not slow"  # skip the end-to-end training test
 python -m ruff check src tests
 ```

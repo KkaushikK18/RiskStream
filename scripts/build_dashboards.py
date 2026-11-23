@@ -23,6 +23,12 @@ OUT = Path(__file__).resolve().parents[1] / "infrastructure" / "grafana" / "dash
 DS = {"type": "prometheus", "uid": "prometheus"}
 APP = 'tier="app"'
 
+# Quantiles from a handful of observations are noise: with 8 requests, p95 is
+# simply the slowest one. Latency quantiles are hidden ("no traffic") unless the
+# window holds at least this many observations.
+MIN_SAMPLES = 20
+NO_TRAFFIC = "no traffic"
+
 
 class Board:
     def __init__(self, uid: str, title: str, description: str) -> None:
@@ -61,8 +67,11 @@ class Board:
     def panel(self, kind: str, title: str, targets: list[tuple[str, str]], *, unit: str = "short", w: int = 12,
               h: int = 8, description: str = "", thresholds: list[tuple[float | None, str]] | None = None,
               options: dict | None = None, decimals: int | None = None, mappings: list | None = None,
-              stack: bool = False, min_: float | None = None, max_: float | None = None) -> None:
+              stack: bool = False, min_: float | None = None, max_: float | None = None,
+              soft_max: float | None = None, no_value: str | None = None) -> None:
         defaults: dict = {"unit": unit}
+        if no_value is not None:
+            defaults["noValue"] = no_value
         if decimals is not None:
             defaults["decimals"] = decimals
         if min_ is not None:
@@ -75,13 +84,26 @@ class Board:
         if mappings:
             defaults["mappings"] = mappings
         if kind == "timeseries":
-            defaults["custom"] = {"lineWidth": 1, "fillOpacity": 10, "showPoints": "never",
-                                  "stacking": {"mode": "normal" if stack else "none"}}
+            # Soft axis limits: an all-zero series shows 0..soft_max instead of an
+            # arbitrary auto-range (e.g. "10000%"); real data still extends the axis.
+            if soft_max is None:
+                soft_max = 0.01 if unit == "percentunit" else 1
+            defaults["custom"] = {
+                "lineWidth": 1, "showPoints": "never", "axisSoftMin": 0, "axisSoftMax": soft_max,
+                # Stacked series need a solid fill, otherwise only the top line is visible
+                # and it looks as if the top series carried the whole total.
+                "fillOpacity": 60 if stack else 10,
+                "stacking": {"mode": "normal" if stack else "none"},
+            }
+        # Stats and tables show the value *now* (instant query). A range query with
+        # "last not null" would keep showing an old value long after traffic stopped.
+        instant = kind in ("stat", "table")
         p = {
             "id": self._id(), "type": kind, "title": title, "description": description, "datasource": DS,
             "gridPos": self._place(w, h),
             "targets": [{"refId": chr(65 + i), "expr": expr, "legendFormat": legend, "datasource": DS,
-                         **({"instant": True, "format": "table"} if kind == "table" else {})}
+                         **({"instant": True, "range": False} if instant else {}),
+                         **({"format": "table"} if kind == "table" else {})}
                         for i, (expr, legend) in enumerate(targets)],
             "fieldConfig": {"defaults": defaults, "overrides": []},
             "options": options or {},
@@ -118,9 +140,19 @@ UPDOWN = [{"type": "value", "options": {"0": {"text": "DOWN", "color": "red"}, "
 YESNO = [{"type": "value", "options": {"0": {"text": "NO", "color": "red"}, "1": {"text": "YES", "color": "green"}}}]
 
 
-def q(quantile: float, metric: str, by: str = "", sel: str = "") -> str:
+def q(quantile: float, metric: str, by: str = "", sel: str = "", window: str = "$__rate_interval",
+      min_samples: int = MIN_SAMPLES) -> str:
+    """Histogram quantile, returned only where the window holds >= min_samples observations
+    (per group when ``by`` is given)."""
     grp = f"le{', ' + by if by else ''}"
-    return f"histogram_quantile({quantile}, sum by ({grp}) (rate({metric}_bucket{{{sel}}}[$__rate_interval])))"
+    base = f"histogram_quantile({quantile}, sum by ({grp}) (rate({metric}_bucket{{{sel}}}[{window}])))"
+    count = f"sum{f' by ({by})' if by else ''} (increase({metric}_count{{{sel}}}[{window}]))"
+    return f"{base} and on({by}) ({count} >= {min_samples})"
+
+
+SCORE_P95_NOW = ("riskstream:score_latency_seconds:p95_5m and on() "
+                 f'(sum(increase(riskstream_http_request_duration_seconds_count{{route="/v1/score"}}[5m])) '
+                 f">= {MIN_SAMPLES})")
 
 
 def api_board() -> Board:
@@ -128,11 +160,12 @@ def api_board() -> Board:
               "Request traffic, latency, errors, protection, process resources and dependencies.")
     b.row("Overview")
     b.stat("API instances up", 'count(up{job="api"} == 1) or vector(0)', thresholds=BAD_GOOD)
-    b.stat("Requests / s (/v1)", 'sum(rate(riskstream_http_requests_total{route=~"/v1/.*"}[$__rate_interval])) or vector(0)',
+    b.stat("Requests / s (/v1, 5m)", 'sum(rate(riskstream_http_requests_total{route=~"/v1/.*"}[5m])) or vector(0)',
            unit="reqps", decimals=1, thresholds=[(None, "blue")])
-    b.stat("5xx ratio (/v1, 5m)", "riskstream:http_5xx_ratio:rate5m or vector(0)", unit="percentunit", decimals=2,
+    b.stat("5xx ratio (/v1, 5m)", "sum(riskstream:http_5xx_ratio:rate5m) or vector(0)", unit="percentunit", decimals=2,
            thresholds=[(None, "green"), (0.01, "orange"), (0.05, "red")])
-    b.stat("/v1/score p95", "riskstream:score_latency_seconds:p95_5m", unit="s", decimals=3,
+    b.stat("/v1/score p95 (5m)", SCORE_P95_NOW, unit="s", decimals=3, no_value=NO_TRAFFIC,
+           description=f"Hidden when fewer than {MIN_SAMPLES} requests in 5 minutes: p95 of a few requests is just the slowest one.",
            thresholds=[(None, "green"), (0.1, "orange"), (0.25, "red")])
     b.stat("Model loaded", "min(riskstream_model_loaded)", mappings=YESNO, thresholds=BAD_GOOD)
     b.stat("Firing alerts", 'count(ALERTS{alertstate="firing"}) or vector(0)', thresholds=GOOD_BAD)
@@ -146,7 +179,8 @@ def api_board() -> Board:
         ('sum(rate(riskstream_http_requests_total{route=~"/v1/.*", status=~"4.."}[$__rate_interval])) or vector(0)', "4xx"),
         ('sum(rate(riskstream_http_requests_total{route=~"/v1/.*", status=~"5.."}[$__rate_interval])) or vector(0)', "5xx"),
     ], unit="reqps")
-    b.ts("Error ratio (/v1)", [("riskstream:http_5xx_ratio:rate5m", "5xx share")], unit="percentunit")
+    b.ts("Error ratio (/v1)", [("sum(riskstream:http_5xx_ratio:rate5m)", "5xx share")], unit="percentunit",
+         max_=1)
 
     b.row("Latency")
     b.ts("/v1/score latency (server side)", [
@@ -218,7 +252,8 @@ def streaming_board() -> Board:
            thresholds=[(None, "green"), (5, "orange"), (60, "red")])
     b.stat("Feature consumer lag (broker)", "max(riskstream_feature_consumer_broker_lag_messages)",
            thresholds=[(None, "green"), (100, "orange"), (1000, "red")])
-    b.stat("Scored -> Redis p95", q(0.95, "riskstream_stream_event_age_seconds"), unit="s", decimals=2,
+    b.stat("Scored -> Redis p95 (5m)", q(0.95, "riskstream_stream_event_age_seconds", window="5m"), unit="s",
+           decimals=2, no_value=NO_TRAFFIC,
            thresholds=[(None, "green"), (2, "orange"), (5, "red")])
     b.stat("Dead letters (1h)", "sum(increase(riskstream_dlq_messages_total[1h])) or vector(0)", thresholds=GOOD_BAD)
 
@@ -277,18 +312,23 @@ def model_board() -> Board:
     b.row("Overview")
     b.panel("table", "Loaded model and policy", [("max by (model_version, policy_version, feature_version) "
                                                   "(riskstream_model_info)", "")], w=12, h=4)
-    b.stat("Decisions / s", "sum(rate(riskstream_decisions_total[$__rate_interval])) or vector(0)", unit="ops",
+    b.stat("Decisions / s (5m)", "sum(rate(riskstream_decisions_total[5m])) or vector(0)", unit="ops",
            decimals=2, thresholds=[(None, "blue")])
-    b.stat("Decline share", 'sum(rate(riskstream_decisions_total{decision="DECLINE"}[$__rate_interval])) '
-           "/ clamp_min(sum(rate(riskstream_decisions_total[$__rate_interval])), 1e-9)", unit="percentunit", decimals=2,
-           thresholds=[(None, "blue")])
-    b.stat("Review share", 'sum(rate(riskstream_decisions_total{decision="REVIEW"}[$__rate_interval])) '
-           "/ clamp_min(sum(rate(riskstream_decisions_total[$__rate_interval])), 1e-9)", unit="percentunit", decimals=2,
-           thresholds=[(None, "blue")])
+    b.stat("Decline share (5m)", '(sum(rate(riskstream_decisions_total{decision="DECLINE"}[5m])) or vector(0)) '
+           "/ (sum(rate(riskstream_decisions_total[5m])) > 0)", unit="percentunit", decimals=2,
+           thresholds=[(None, "blue")], no_value=NO_TRAFFIC)
+    b.stat("Review share (5m)", '(sum(rate(riskstream_decisions_total{decision="REVIEW"}[5m])) or vector(0)) '
+           "/ (sum(rate(riskstream_decisions_total[5m])) > 0)", unit="percentunit", decimals=2,
+           thresholds=[(None, "blue")], no_value=NO_TRAFFIC)
 
     b.row("Decisions")
     b.ts("Decisions / s by outcome", [("sum by (decision) (rate(riskstream_decisions_total[$__rate_interval]))",
-                                       "{{decision}}")], unit="ops", stack=True)
+                                       "{{decision}}")], unit="ops",
+         description="Not stacked: each line is its own rate. APPROVE dominates; see the next panel for declines.")
+    b.ts("Declines and reviews / s", [
+        ('sum(rate(riskstream_decisions_total{decision="DECLINE"}[$__rate_interval])) or vector(0)', "DECLINE"),
+        ('sum(rate(riskstream_decisions_total{decision="REVIEW"}[$__rate_interval])) or vector(0)', "REVIEW"),
+    ], unit="ops", soft_max=0.1, description="The rare outcomes on their own axis, so they are not flattened by APPROVE.")
     b.ts("Decisions / s by model version", [("sum by (model_version) (rate(riskstream_decisions_total[$__rate_interval]))",
                                              "{{model_version}}")], unit="ops")
     b.panel("heatmap", "Fraud probability distribution",
@@ -298,8 +338,9 @@ def model_board() -> Board:
                      "color": {"mode": "scheme", "scheme": "Oranges", "steps": 64},
                      "rowsFrame": {"layout": "auto"}, "tooltip": {"show": True}})
     b.ts("Mean fraud probability", [("sum(rate(riskstream_fraud_probability_sum[$__rate_interval])) "
-                                     "/ clamp_min(sum(rate(riskstream_fraud_probability_count[$__rate_interval])), 1e-9)",
-                                     "mean p")], unit="percentunit")
+                                     "/ (sum(rate(riskstream_fraud_probability_count[$__rate_interval])) > 0)",
+                                     "mean p")], unit="percentunit", max_=1, soft_max=0.05,
+         description="Gaps mean no scored transactions in that interval.")
 
     b.row("Requests and labels")
     b.ts("Idempotent replays and conflicts / s", [

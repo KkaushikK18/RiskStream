@@ -135,3 +135,30 @@ Live results (2026-11-23, after replaying steps 613-614, 1,323 transactions):
 3. **The 5xx and fallback ratio series were empty, not 0, without errors.** A labelled counter
    has no series until its first increment, so the numerator was empty. The recording rules
    now use `or vector(0)` on the numerator.
+
+## Dashboard review fixes (2026-11-23)
+
+Found by checking screenshots of the live dashboards against Prometheus, the API logs,
+the database and the PaySim file.
+
+| Panel | What it showed | Cause | Fix |
+|---|---|---|---|
+| `/v1/score p95` | 1.900 s in red while idle | 8 requests (step 615); the first took 1,119 ms, the rest 29-52 ms. With 8 samples, p95 is the slowest request. The stat used a range query with "last not null", so it kept showing that value 10 minutes later | Quantiles are shown only when the window has at least 20 observations, otherwise "no traffic". Stats and tables use instant queries (value now). `ApiHighLatency` also requires at least 0.1 req/s |
+| `5xx ratio` | two 0.00% boxes | `rule or vector(0)`: the rule's series keeps its name label, `vector(0)` has none, so before the rule reload Grafana saw two series | `sum(rule) or vector(0)`: always one series |
+| Decisions by outcome | looked as if everything was REVIEW | stacked with 10% fill: the top line (REVIEW = 0) is drawn at the total height | not stacked; new panel "Declines and reviews / s" so rare outcomes are not flattened by APPROVE; stacked panels elsewhere use 60% fill |
+| ratio and rate panels | axes like 10000% or 100 req/s with all-zero data | Grafana auto-range on a flat series | soft axis 0..1 (rates) or 0..1% (ratios), percent panels capped at 100% |
+| Decline / review share | 0.00% with no traffic | divided by `clamp_min(total, 1e-9)` | divide by `(total > 0)`: "no traffic" when nothing was scored, 0% when scored but none declined |
+
+Checked live afterwards: after the 6 transactions of step 616 the p95, share and
+scored-to-Redis stats show "no traffic"; during step 617 (2,680 transactions) they show
+p95 35 ms, decline share 0.68%, review share 0%, scored to Redis p95 1.31 s.
+`check_dashboards.py`: 91 queries, 0 errors. Six new tests in
+`tests/unit/test_observability_config.py` guard each fix.
+
+**The 1.1 s first request after idle.** Every stage of that request was slow (idempotency
+check, feature derivation, model inference, persist all 60-250 ms) except the Redis read,
+so it was not one dependency. The Docker VM has 2.8 GB and was using swap: the API process
+had 63 MB swapped out, the relay 41 MB, the scoring worker 30 MB. After 40 idle minutes the
+first request paged code and model memory back in. This is a property of the laptop's memory
+budget, not a code fault, so no code change was made. Stopping the `mlflow` profile when it
+is not needed frees about 400 MB.

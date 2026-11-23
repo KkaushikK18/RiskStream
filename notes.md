@@ -281,3 +281,23 @@ caused, what changed, and how it was checked.
 | 5a | `roles.sql` removes the right to connect to the database from everyone, then gives it back to the app role only | postgres-exporter could log in but not open the database, so `pg_up` was 0 and PostgresDown fired while PostgreSQL was healthy | `GRANT CONNECT ON DATABASE riskstream TO riskstream_monitor`; a test checks every login role has the grant |
 | 5b | redis-exporter waited up to 15 s for Redis; Prometheus gives a scrape 5 s | with Redis paused the whole scrape timed out, `redis_up` vanished, and RedisDown never fired (only "exporter down") | exporter timeouts set to 2 s; the scrape now returns `redis_up 0` in about 2 s; a test checks the timeouts stay below 5 s |
 | 5c | the 5xx-ratio and fallback-ratio rules divided "errors" by "all requests" | with no errors yet the error series does not exist, so the ratio was empty instead of 0 and its graph was blank | the rules use `or vector(0)` for the error side |
+## 6. Grafana dashboard fixes after review
+
+- **Phase:** 6 (found by checking dashboard screenshots).
+- **Before:** stat panels read a range query and showed the last value seen in the
+  hour; quantiles were shown however few requests there were; the decisions graph was
+  stacked with an almost transparent fill.
+- **Problem:** the API board showed `/v1/score p95 = 1.900 s` in red while idle. It came
+  from only 8 requests, one of which took 1.1 s, and the panel kept showing it 10 minutes
+  later. The 5xx ratio showed two boxes. The decisions graph looked like everything was
+  REVIEW (really 798 APPROVE, 5 DECLINE, 0 REVIEW). Flat panels had axes like 10000%.
+- **Change:** quantiles only with at least 20 requests in the window ("no traffic"
+  otherwise); stats show the current value; `sum(...) or vector(0)` gives one series;
+  decisions not stacked plus a separate "Declines and reviews" panel; fixed axis ranges;
+  `ApiHighLatency` alert ignores fewer than 0.1 req/s.
+  Files: `scripts/build_dashboards.py`, `infrastructure/prometheus/alerts.yml`,
+  `infrastructure/prometheus/tests/alerts_test.yml`, `tests/unit/test_observability_config.py`.
+- **Result:** after 6 requests the panels say "no traffic"; during 2,680 requests p95 is
+  35 ms. 0 query errors, promtool SUCCESS, 238 tests pass.
+- **Slow first request:** caused by swap on the 2.8 GB Docker VM after 40 idle minutes
+  (every stage slow, not one dependency). Not a code bug; no change made.

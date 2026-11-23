@@ -56,7 +56,7 @@ def metric_names(expr: str) -> set[str]:
     stripped = re.sub(r'"[^"]*"', "", stripped)         # string literals
     stripped = re.sub(r"\[[^\]]*\]", "", stripped)      # range selectors
     stripped = re.sub(r"\bby\s*\([^)]*\)", "", stripped)
-    stripped = re.sub(r"\bwithout\s*\([^)]*\)", "", stripped)
+    stripped = re.sub(r"\b(?:without|on|ignoring)\s*\([^)]*\)", "", stripped)
     stripped = re.sub(r"(?<![A-Za-z0-9_:])\d+(?:\.\d+)?(?:[eE][-+]?\d+)?", "", stripped)  # numbers, 1e-9
     names = set(re.findall(r"[A-Za-z_:][A-Za-z0-9_:]*", stripped))
     return {n for n in names if n not in PROMQL_WORDS}
@@ -110,6 +110,67 @@ def test_dashboard_queries_have_balanced_brackets():
     for f, title, expr in dashboard_exprs():
         for o, c in ("()", "{}", "[]"):
             assert expr.count(o) == expr.count(c), (f, title, expr)
+
+
+def _panels():
+    for f in sorted(DASHBOARDS.glob("*.json")):
+        for p in json.loads(f.read_text(encoding="utf-8"))["panels"]:
+            yield f.name, p
+
+
+def test_every_quantile_has_a_minimum_sample_guard():
+    """p95 of a handful of requests is the slowest one: 8 requests once showed p95 = 1.9 s."""
+    for f, p in _panels():
+        for t in p.get("targets", []):
+            if "histogram_quantile" in t["expr"] and p["type"] != "heatmap":
+                assert re.search(r"and on\([^)]*\) \(.*_count.*\) >= \d+\)?$", t["expr"]), (f, p["title"])
+    stat = next(p for f, p in _panels() if p["title"] == "/v1/score p95 (5m)")
+    assert stat["targets"][0]["expr"].startswith("riskstream:score_latency_seconds:p95_5m and on() (")
+    assert stat["fieldConfig"]["defaults"]["noValue"] == "no traffic"
+
+
+def test_stats_and_tables_use_instant_queries():
+    """A range query + 'last not null' kept showing a 10-minute-old p95 after traffic stopped."""
+    for f, p in _panels():
+        if p["type"] in ("stat", "table"):
+            for t in p["targets"]:
+                assert t.get("instant") is True and t.get("range") is False, (f, p["title"])
+
+
+def test_stat_queries_return_one_series():
+    """`X or vector(0)` gives two series when X keeps its labels (it showed two 0.00% boxes)."""
+    for f, p in _panels():
+        if p["type"] == "stat":
+            expr = p["targets"][0]["expr"]
+            if "or vector(0)" in expr:
+                bare = re.sub(r"\{[^}]*\}", "", expr)  # label matchers may contain "/"
+                for part in bare.split(" or vector(0)")[:-1]:
+                    head = part.split(" / ")[-1].strip().lstrip("(")
+                    assert re.match(r"^(sum|count|max|min)\(", head), (f, p["title"], expr)
+
+
+def test_stacked_series_are_filled_and_decisions_not_stacked():
+    for f, p in _panels():
+        if p["type"] != "timeseries":
+            continue
+        custom = p["fieldConfig"]["defaults"]["custom"]
+        if custom["stacking"]["mode"] != "none":
+            assert custom["fillOpacity"] >= 50, (f, p["title"])
+        assert custom["axisSoftMin"] == 0 and custom["axisSoftMax"] > 0, (f, p["title"])
+        if p["title"] == "Decisions / s by outcome":
+            assert custom["stacking"]["mode"] == "none"
+
+
+def test_percent_timeseries_are_capped_at_100_percent():
+    for f, p in _panels():
+        d = p.get("fieldConfig", {}).get("defaults", {})
+        if p["type"] == "timeseries" and d.get("unit") == "percentunit":
+            assert d.get("max") == 1, (f, p["title"])
+
+
+def test_latency_alert_has_traffic_guard():
+    rule = next(r for r in load_rules() if r.get("alert") == "ApiHighLatency")
+    assert "riskstream_http_request_duration_seconds_count" in rule["expr"] and "> 0.1" in rule["expr"]
 
 
 def test_metric_name_extraction():

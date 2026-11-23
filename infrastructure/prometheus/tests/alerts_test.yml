@@ -109,6 +109,8 @@ tests:
     values: 0+100x25
   - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="+Inf"}
     values: 0+100x25
+  - series: riskstream_http_request_duration_seconds_count{route="/v1/score"}
+    values: 0+100x25
   alert_rule_test:
   - eval_time: 10m
     alertname: ApiHighLatency
@@ -387,3 +389,19 @@ tests:
         summary: Redpanda reports low disk space
         description: When the disk fills, producers are rejected.
         runbook_url: docs/incident_runbooks.md#redpandadisklow
+- name: a few slow requests on an idle API do not raise ApiHighLatency
+  interval: 1m
+  input_series:
+  # 2 requests per minute, all slower than 250 ms: p95 is high, traffic is 0.03 req/s
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="0.25"}
+    values: '0x25'
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="2.5"}
+    values: 0+2x25
+  - series: riskstream_http_request_duration_seconds_bucket{route="/v1/score", le="+Inf"}
+    values: 0+2x25
+  - series: riskstream_http_request_duration_seconds_count{route="/v1/score"}
+    values: 0+2x25
+  alert_rule_test:
+  - eval_time: 20m
+    alertname: ApiHighLatency
+    exp_alerts: []
