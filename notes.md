@@ -301,3 +301,103 @@ caused, what changed, and how it was checked.
   35 ms. 0 query errors, promtool SUCCESS, 238 tests pass.
 - **Slow first request:** caused by swap on the 2.8 GB Docker VM after 40 idle minutes
   (every stage slow, not one dependency). Not a code bug; no change made.
+
+---
+
+# Q: How do I take RiskStream from PaySim to real-world use?
+
+**Context.** The model is trained on PaySim, which is simulated data. The system
+around it is built the way a production system would be, but a real deployment
+would need training on a company's own transactions and real business costs in
+the decision policy. This project is for learning, so the question is: how would
+this scale for real-world use, how do you keep improving the model and the data,
+and how do you handle many more users efficiently?
+
+**Short answer.** It is not one change but three separate tracks: get better
+data, improve the model in a continuous loop, and scale the system. Real fraud
+teams work on all three at once, and each one can be practised in this project.
+
+## 1. The data problem
+
+**Why PaySim limits you:** its fraud is too easy to catch. The ablation showed
+it: with balance columns the model scored PR-AUC 0.9999, without them only 0.62.
+That gap comes from the way the simulator was built, not from a real fraud
+pattern. Real data is messier in ways PaySim doesn't have:
+
+| Real data has | What it means |
+|---|---|
+| Rich signals | device, IP address, merchant, card, location, login behaviour |
+| Late and noisy labels | a chargeback arrives weeks later; some fraud is never reported |
+| Selection bias | a declined payment never gets a label, so you never learn whether that decline was right |
+| Adaptive fraudsters | when you block one pattern, they switch to another |
+| Privacy rules | card numbers and personal data need protection (PCI DSS, GDPR) |
+
+**What you can do as a learner:**
+
+| Dataset | Why use it |
+|---|---|
+| **IEEE-CIS Fraud Detection** (Kaggle, from Vesta) | Real anonymised e-commerce payments: about 590k transactions, about 3.5% fraud, hundreds of features (card, device, email domain). **Best next step**: the adapter layer was built so IEEE-CIS can plug in as a second dataset. |
+| **Bank Account Fraud (BAF)** (Feedzai, NeurIPS 2022) | Realistic synthetic account-opening fraud, with versions that include bias, so you can study fairness |
+| **Credit Card Fraud** (Kaggle, ULB) | 284,807 real card transactions with 492 frauds; features are anonymised by PCA, so there is little to engineer |
+
+Training on IEEE-CIS would show that the pipeline isn't tied to PaySim, and the
+results would be believable numbers, not 0.9999.
+
+## 2. Improving the model continuously
+
+At a company the model is never "finished". It runs in a loop (Phases 7 and 8):
+
+```text
+score ──► collect labels ──► measure real performance + drift ──► retrain
+  ▲                                                                  │
+  └──── canary ◄── shadow ◄── challenger must beat champion ◄────────┘
+```
+
+What matters most in practice:
+
+1. **Measure on labelled outcomes, not on the training score.** Precision,
+   recall and money saved, tracked over time.
+2. **Fix the selection-bias gap.** Send a small, controlled share of would-be
+   declines to review instead. That share then gets labels, so you learn whether
+   the declines were right.
+3. **Backtest by time.** A new model is compared with the current one on recent
+   data it never saw: the same chronological-split rule already used here.
+4. **Better features matter more than new algorithms.** For example:
+   - device and IP velocity;
+   - graph features, such as how many accounts share a device, or whether this
+     receiver is connected to known fraud;
+   - merchant risk.
+5. **Use real costs.** Finance supplies the cost of a missed fraud, a wrong
+   decline and an analyst review. The policy file already has this structure;
+   only the numbers would change.
+6. **Explain decisions.** Reason codes (for example from SHAP) tell analysts and
+   regulators why a payment was declined.
+
+## 3. Scaling to more users
+
+**Rule one: measure before scaling.** Phase 9 (load testing) finds the real
+limits. Today we only know that one API instance gives about 35 ms p95 at the
+low rates tested; its maximum throughput is not known yet.
+
+How each part scales once the limits are known:
+
+| Part | How it scales | Why it's possible here |
+|---|---|---|
+| **API** | More copies behind a load balancer; autoscale on CPU or latency | It is stateless, and idempotency by `transaction_id` makes retries across copies safe |
+| **Model** | Usually not the bottleneck: inference takes a few milliseconds | Bigger models can get their own inference service later |
+| **PostgreSQL** | Connection pooler (PgBouncer); split the predictions table by month; read replicas for analysts; archive old data | Writes are the usual first bottleneck |
+| **Redis** | Redis Cluster, splitting keys by account across nodes | Keys are already per account |
+| **Kafka** | More partitions plus more consumer copies | Consumers run in parallel up to the partition count, currently 6 |
+| **Operations** | SLOs such as "99.9% of requests under 100 ms", on-call rotation, cost tracking | The Phase 6 monitoring is the base for this |
+
+Beyond that, very large systems run in several regions and put a separate fast
+rules engine (for example for blocklists) in front of the model.
+
+## 4. Suggested path for this project
+
+| Step | What | What you get |
+|---|---|---|
+| 1 | **Phase 7** (labels, drift, retraining) on PaySim, with a simulated delay before labels arrive | You learn the improvement loop |
+| 2 | **Add IEEE-CIS** as a second dataset through the existing adapter design, and retrain | Realistic results and richer feature work |
+| 3 | **Phase 9 load test** (k6 or Locust) | Real numbers on how far one laptop setup goes and where it breaks |
+| 4 | **Phase 10 on AWS**, only if you want cloud experience and only with explicit approval (it costs money) | Experience running managed services |
