@@ -1,18 +1,29 @@
 # IEEE-CIS feature configuration (offline). Changing anything that alters feature
 # values requires bumping `version`. PaySim features are in features.yaml.
-version: "ieee-1.0.0"
+version: "ieee-1.1.0"
+# 1.1.0 (2026-11-24): card1 behaviour removed, uid novelty added. Evidence (validation
+# only, same hyperparameters): reports/experiments/ieee_behavior_round*.md and
+# docs/ieee_cis.md#behaviour-features-v110.
 
 # Point-in-time behaviour per entity: for a transaction at time t, a window of W
 # days covers the entity's transactions with time in [t - W*86400, t - 1] seconds.
 # Transactions at the same second as t (including t itself) are never used.
 windows_days: [1, 7, 30]
 
-# Entities whose history is aggregated.
-#   card1 : the card-number group (13k values). Many cards share one card1.
-#   uid   : card1 + addr1 + (day - D1). D1 is "days since the card was first seen",
-#           so day - D1 is that first day and stays constant for one card holder.
-#           A widely used approximation of one client; NaN when addr1 or D1 is missing.
-entities: [card1, uid]
+# Entities whose amount / count history is aggregated.
+#   uid : card1 + addr1 + (day - D1). D1 is "days since the card was first seen",
+#         so day - D1 is that first day and stays constant for one card holder.
+#         A widely used approximation of one client; NaN when addr1 or D1 is missing.
+# card1 (a card-number GROUP shared by many clients) was dropped in 1.1.0: its behaviour
+# features lowered validation PR-AUC (-0.013, 95% CI -0.018 to -0.009).
+entities: [uid]
+
+# Novelty per client: does this transaction use an email domain, device, OS, browser
+# or product the client has used before? (share of earlier transactions with the same
+# value, and a "never before" flag). Earlier transactions only; labels never used.
+novelty:
+  entities: [uid]
+  columns: [ProductCD, P_emaildomain, R_emaildomain, DeviceType, DeviceInfo, id_30, id_31]
 
 # String columns encoded with vocabularies learned on the TRAINING split only:
 #   <col>_code : rank by training frequency (0 = most common); unseen or rare -> NaN
@@ -37,16 +48,19 @@ v_selection:
 
 feature_sets:
   full: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
-         vesta_v, identity, category_code, category_freq, card1_behavior, uid_behavior]
+         vesta_v, identity, category_code, category_freq, uid_behavior, uid_novelty]
   # Logistic regression: integer category codes are not ordinal, so linear models
   # get only the frequency encodings.
   linear: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
-           vesta_v, identity, category_freq, card1_behavior, uid_behavior]
+           vesta_v, identity, category_freq, uid_behavior, uid_novelty]
   # Ablation: without Vesta's V columns. We could not compute them in our own
   # real-time pipeline, so this measures how much the model depends on them.
   no_vesta_v: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
-               identity, category_code, category_freq, card1_behavior, uid_behavior]
-  # Ablation: without our point-in-time behaviour features.
+               identity, category_code, category_freq, uid_behavior, uid_novelty]
+  # Ablation: without the novelty features.
+  no_novelty: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
+               vesta_v, identity, category_code, category_freq, uid_behavior]
+  # Ablation: without any of our point-in-time features (behaviour and novelty).
   no_behavior: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
                 vesta_v, identity, category_code, category_freq]
 

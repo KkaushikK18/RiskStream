@@ -69,12 +69,16 @@ models:
       colsample_bytree: {float: [0.3, 0.8]}
       reg_lambda: {loguniform: [0.1, 20.0]}
       scale_pos_weight: {choice: [1.0, 3.0]}
-  # Ablation: without our point-in-time card1 / uid behaviour features.
+  # Candidate (feature version ieee-1.1.0): the same LightGBM search without our uid
+  # behaviour and novelty features. In the fixed-hyperparameter experiment it scored
+  # higher on validation than the full set (reports/experiments/ieee_behavior_round3.md),
+  # so the feature set is decided like a hyperparameter: both get the same 10 trials and
+  # the pipeline picks the higher validation PR-AUC. The test set is not involved.
   lightgbm_no_behavior:
     estimator: lightgbm
     feature_set: no_behavior
-    candidate_eligible: false
-    n_trials: 6
+    candidate_eligible: true
+    n_trials: 10
     search: *lgb_ablation
 
 anomaly_detection:

@@ -29,7 +29,9 @@ is real, anonymized e-commerce data, but its columns share nothing with PaySim's
 
 ## Consequences
 
-* A second, harder benchmark: test PR-AUC 0.530 for the selected LightGBM.
-* The ablation shows our card1 behaviour features reduce validation PR-AUC; a feature
-  iteration is needed.
+* A second, harder benchmark: test PR-AUC 0.530 (feature version 1.0.0), then 0.556 (1.1.0).
+* 1.1.0 (2026-11-24): card-group (card1) history features removed after a validation-only
+  experiment showed them harmful; the remaining client (uid) history and novelty features
+  became a feature-set choice made on validation, which selected the model without them.
+  The test set has been used twice; reported as such in docs/ieee_cis.md.
 * Peak memory 2.5 GB during training: Docker must be stopped on the development laptop.

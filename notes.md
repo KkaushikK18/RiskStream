@@ -432,3 +432,34 @@ rules engine (for example for blocklists) in front of the model.
 - **Finding to act on:** without our card1 behaviour features, validation PR-AUC is
   *higher* (0.624 vs 0.595, same hyperparameters). They follow total traffic volume, which
   changes week to week. The next feature version should fix or drop them.
+---
+
+## 8. IEEE-CIS behaviour features fixed (feature version ieee-1.1.0)
+
+- **Phase:** IEEE-CIS offline work, follow-up to entry 7.
+- **Before (1.0.0):** 42 history features per card group (card1) and per client (uid).
+  Removing them *raised* validation PR-AUC (0.624 vs 0.595).
+- **Problem:** the features meant to describe past behaviour were making the model worse,
+  and the first explanation (card1 counts follow traffic volume) was only a guess.
+- **How it was investigated** (validation only; the test split was never read):
+  1. a drift check (PSI, train vs validation) found 4 features that shift with elapsed
+     time (e.g. `card1_txn_count_all`: median 219 in train, 695 in validation);
+  2. removing those, capping "hours since last" at 30 days and dropping the first 30 days
+     did **not** help (-0.005 and -0.012), so the volume explanation was wrong;
+  3. testing each entity showed the **card1 features are the harmful part** (+0.013 when
+     removed, 95% CI +0.009 to +0.018), with or without Vesta's V columns. card1 is a group
+     of many clients, and patterns learned from groups did not hold in later weeks;
+  4. new per-client "novelty" features (same email, device, browser as before?) were
+     built and verified (0 mismatches in 2,100 values), but added nothing (+0.000).
+- **Change:** card1 history features removed; uid history and novelty kept and measured;
+  the feature set is now chosen on validation like a hyperparameter
+  (`lightgbm` and `lightgbm_no_behavior` get the same 10 trials). Validation chose the
+  model without our history features. Files: `configs/ieee_cis_features.yaml`,
+  `configs/model_ieee_cis.yaml`, `src/riskstream/features/ieee_cis.py`,
+  `scripts/ieee_behavior_experiment.py`, `reports/experiments/ieee_behavior_round{1,2,3}.md`.
+- **Result:** test PR-AUC 0.530 -> **0.556**; fraud flagged on test 61.8% -> 65.7%;
+  recall at 1% FPR 43.4% -> 47.8%. The test set has now been used twice (disclosed).
+  256 tests pass (3 new).
+- **Lesson:** Vesta's own columns (C counts, D time deltas, V) are already built from the
+  full payment history we never see, so our history features had nothing to add here.
+  They will matter in an online version, where those provider columns would not exist.

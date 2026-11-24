@@ -76,6 +76,8 @@ class IEEEFeatureConfig:
     version: str
     windows_days: tuple[int, ...]
     entities: tuple[str, ...]
+    novelty_entities: tuple[str, ...]
+    novelty_columns: tuple[str, ...]
     categorical: tuple[str, ...]
     max_vocabulary: int
     min_count: int
@@ -94,6 +96,8 @@ class IEEEFeatureConfig:
         return cls(
             version=str(c["version"]), windows_days=tuple(int(w) for w in c["windows_days"]),
             entities=tuple(c["entities"]), categorical=tuple(cat["columns"]),
+            novelty_entities=tuple(c.get("novelty", {}).get("entities", ())),
+            novelty_columns=tuple(c.get("novelty", {}).get("columns", ())),
             max_vocabulary=int(cat["max_vocabulary"]), min_count=int(cat["min_count"]),
             frequency_numeric=tuple(c["frequency_numeric"]), v_sample_rows=int(v["sample_rows"]),
             v_correlation_threshold=float(v["correlation_threshold"]), v_seed=int(v["seed"]),
@@ -205,6 +209,44 @@ def behavior_features(base: pl.DataFrame, entity: str, windows: tuple[int, ...])
     # Undefined entity: every feature is NaN, never a misleading 0.
     return out.select("transaction_id", *[pl.when(undefined).then(None).otherwise(pl.col(n)).cast(pl.Float32).alias(n)
                                           for n in names])
+
+
+def novelty_feature_names(entity: str, columns: tuple[str, ...]) -> list[str]:
+    return [f"{entity}_prior_share_same_{c}" for c in columns] + [f"{entity}_is_new_{c}" for c in columns]
+
+
+def novelty_features(base: pl.DataFrame, entity: str, columns: tuple[str, ...]) -> pl.DataFrame:
+    """Does the entity use a value (email domain, device, ...) it has used before?
+
+    For each column c: among the entity's earlier transactions (time < t, same second
+    excluded), the share that had the same value of c, and a flag for "never before".
+    Missing is its own value. NaN when the entity is undefined or has no earlier
+    transactions. ``base`` holds transaction_id, event_time_s, ``_key_<entity>`` and
+    the value columns.
+    """
+    key = f"_key_{entity}"
+    df = base.select("transaction_id", "event_time_s", key, *columns)
+
+    def prior_count(frame: pl.DataFrame, k: str) -> pl.Series:
+        run = (frame.filter(pl.col(k).is_not_null()).group_by(k, "event_time_s").agg(pl.len().cast(pl.Float64).alias("n"))
+               .sort(k, "event_time_s").with_columns(pl.col("n").cum_sum().over(k).alias("c"))
+               .select(k, pl.col("event_time_s").alias("at_t"), "c").sort("at_t"))
+        probe = frame.select("transaction_id", k, (pl.col("event_time_s") - 1).alias("_p")).sort("_p")
+        got = probe.join_asof(run, left_on="_p", right_on="at_t", by=k, strategy="backward", check_sortedness=False)
+        return frame.select("transaction_id").join(got.select("transaction_id", "c"), on="transaction_id",
+                                                   how="left", maintain_order="left")["c"].fill_null(0.0)
+
+    out = df.select("transaction_id", pl.col(key).is_null().alias("_undef"),
+                    prior_count(df, key).alias("_total"))
+    defined = ~pl.col("_undef") & (pl.col("_total") > 0)
+    for c in columns:
+        pair = df.with_columns(pl.when(pl.col(key).is_null()).then(None).otherwise(
+            pl.struct(pl.col(key), pl.col(c).cast(pl.String).fill_null(MISSING_TOKEN)).hash(seed=1)).alias("_pair"))
+        same = pl.col(f"_same_{c}")
+        out = out.with_columns(prior_count(pair, "_pair").alias(f"_same_{c}")).with_columns(
+            pl.when(defined).then(same / pl.col("_total")).cast(pl.Float32).alias(f"{entity}_prior_share_same_{c}"),
+            pl.when(defined).then((same == 0).cast(pl.Float32)).alias(f"{entity}_is_new_{c}"))
+    return out.select("transaction_id", *novelty_feature_names(entity, columns))
 
 
 # ------------------------------------------------------------------ encoders (training split only)
@@ -326,6 +368,16 @@ def build_specs(cfg: IEEEFeatureConfig, v_kept: list[str]) -> tuple[FeatureSpec,
         for n in behavior_feature_names(e, cfg.windows_days):
             specs.append(S(n, f"{e}_behavior", "float32", f"Point-in-time behaviour of {e}: {n}", src + ("TransactionAmt",),
                            "entity transactions with time in [t - W days, t - 1 s]; labels never used", miss))
+    for e in cfg.novelty_entities:
+        for c in cfg.novelty_columns:
+            specs.append(S(f"{e}_prior_share_same_{c}", f"{e}_novelty", "float32",
+                           f"Share of the {e}'s earlier transactions with the same {c} (missing is a value)",
+                           ("card1", "addr1", "D1", "TransactionDT", c),
+                           "count(earlier, same value) / count(earlier); NaN if no earlier transactions",
+                           "nan_undefined"))
+            specs.append(S(f"{e}_is_new_{c}", f"{e}_novelty", "float32",
+                           f"1 if the {e} has never used this {c} before", ("card1", "addr1", "D1", "TransactionDT", c),
+                           "count(earlier, same value) == 0; NaN if no earlier transactions", "nan_undefined"))
     names = [s.name for s in specs]
     assert len(names) == len(set(names)), "duplicate feature names"
     return tuple(specs)
@@ -355,6 +407,7 @@ class IEEERegistry:
         wanted = set(self.names(feature_set))
         return {"dataset": DATASET, "feature_version": self.version, "feature_set": feature_set,
                 "windows_days": list(self.config.windows_days), "entities": list(self.config.entities),
+                "novelty": {"entities": list(self.config.novelty_entities), "columns": list(self.config.novelty_columns)},
                 "encoders_sha256": self.encoders_sha256, "v_selected": self.v_selection["kept"],
                 "features": [asdict(s) for s in self.specs if s.name in wanted],
                 "excluded_columns": EXCLUDED_COLUMNS}
@@ -408,8 +461,10 @@ def feature_frame(lf: pl.LazyFrame, behavior: pl.DataFrame, enc: dict, registry:
 
 
 def build_behavior(lf: pl.LazyFrame, cfg: IEEEFeatureConfig) -> pl.DataFrame:
-    base = with_entity_keys(lf).select("transaction_id", "event_time_s", "amount", "_key_card1", "_key_uid").collect()
+    base = with_entity_keys(lf).select("transaction_id", "event_time_s", "amount", "_key_card1", "_key_uid",
+                                       *cfg.novelty_columns).collect()
     parts = [behavior_features(base, e, cfg.windows_days) for e in cfg.entities]
+    parts += [novelty_features(base, e, cfg.novelty_columns) for e in cfg.novelty_entities]
     out = parts[0]
     for p in parts[1:]:
         out = out.join(p, on="transaction_id", how="left", maintain_order="left")
@@ -459,7 +514,8 @@ def run_build_features(splits_dir: Path | None = None, out_dir: Path | None = No
     meta = {
         "dataset": DATASET, "feature_version": registry.version,
         "schema_hash_full": registry.schema_hash("full"), "n_features_full": len(registry.names("full")),
-        "windows_days": list(cfg.windows_days), "entities": list(cfg.entities), "rows": counts,
+        "windows_days": list(cfg.windows_days), "entities": list(cfg.entities),
+        "novelty": {"entities": list(cfg.novelty_entities), "columns": list(cfg.novelty_columns)}, "rows": counts,
         "train_sampled": {"rows": int(sampled[0]), "fraud": int(sampled[1]),
                           "negative_sample_rate": cfg.negative_sample_rate, "sampling_seed": cfg.sampling_seed,
                           "note": "negatives kept by a deterministic hash of transaction_id; all positives kept"},

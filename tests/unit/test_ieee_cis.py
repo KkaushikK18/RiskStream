@@ -244,3 +244,44 @@ def test_build_features_end_to_end(tmp_path):
     # M flags map T/F to 1/0
     m = pl.read_parquet(out / "val.parquet")["M1"].unique().to_list()
     assert set(m) <= {0.0, 1.0}
+
+
+# ------------------------------------------------------------------ novelty features (ieee-1.1.0)
+
+def _nov_base(rows: list[tuple[int, int | None, str | None]]) -> pl.DataFrame:
+    """(time_s, uid key or None, email) -> base frame for novelty_features."""
+    return pl.DataFrame({"transaction_id": [f"t{i}" for i in range(len(rows))],
+                         "event_time_s": [r[0] for r in rows], "_key_uid": [r[1] for r in rows],
+                         "P_emaildomain": [r[2] for r in rows]},
+                        schema={"transaction_id": pl.String, "event_time_s": pl.Int64, "_key_uid": pl.UInt64,
+                                "P_emaildomain": pl.String})
+
+
+def test_novelty_share_and_new_flag():
+    rows = [(0, 1, "a.com"), (10, 1, "a.com"), (20, 1, "b.com"), (30, 1, "a.com"), (40, 1, None), (50, 1, None)]
+    out = {r["transaction_id"]: r for r in feats.novelty_features(_nov_base(rows), "uid", ("P_emaildomain",)).iter_rows(named=True)}
+    assert out["t0"]["uid_prior_share_same_P_emaildomain"] is None and out["t0"]["uid_is_new_P_emaildomain"] is None
+    assert out["t1"]["uid_prior_share_same_P_emaildomain"] == 1.0 and out["t1"]["uid_is_new_P_emaildomain"] == 0.0
+    assert out["t2"]["uid_prior_share_same_P_emaildomain"] == 0.0 and out["t2"]["uid_is_new_P_emaildomain"] == 1.0
+    assert out["t3"]["uid_prior_share_same_P_emaildomain"] == pytest.approx(2 / 3)
+    assert out["t4"]["uid_is_new_P_emaildomain"] == 1.0       # first missing value is "new"
+    assert out["t5"]["uid_prior_share_same_P_emaildomain"] == pytest.approx(1 / 5)  # missing is its own value
+
+
+def test_novelty_excludes_same_second_other_clients_and_future():
+    rows = [(0, 1, "a.com"), (5, 2, "z.com"), (10, 1, "z.com"), (10, 1, "z.com"), (20, None, "a.com")]
+    out = {r["transaction_id"]: r for r in feats.novelty_features(_nov_base(rows), "uid", ("P_emaildomain",)).iter_rows(named=True)}
+    # t2 and t3 share second 10: neither sees the other; client 2's z.com does not count for client 1
+    for t in ("t2", "t3"):
+        assert out[t]["uid_is_new_P_emaildomain"] == 1.0 and out[t]["uid_prior_share_same_P_emaildomain"] == 0.0
+    assert out["t1"]["uid_is_new_P_emaildomain"] is None      # client 2 has no history
+    assert out["t4"]["uid_is_new_P_emaildomain"] is None      # undefined client
+
+
+def test_v1_1_drops_card1_behaviour_and_keeps_uid():
+    cfg = feats.get_config()
+    reg_specs = feats.build_specs(cfg, ["V1"])
+    names = {s.name for s in reg_specs}
+    assert cfg.entities == ("uid",) and not [n for n in names if n.startswith("card1_txn") or "card1_amount" in n]
+    assert "card1_freq" in names and "uid_txn_count_7d" in names
+    assert {f"uid_is_new_{c}" for c in cfg.novelty_columns} <= names

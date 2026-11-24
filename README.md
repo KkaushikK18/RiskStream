@@ -266,24 +266,25 @@ Decision thresholds are tuned separately from the model with
 the current cost assumptions, 0.11% of validation payments go to REVIEW and
 1.62% are declined.
 
-IEEE-CIS run, `reports/model_evaluation/20261124055551-ieee_cis/report.md`:
+IEEE-CIS run (feature version `ieee-1.1.0`), `reports/model_evaluation/20261124083727-ieee_cis/report.md`:
 
 | model | validation PR-AUC |
 |---|---:|
-| LightGBM (selected; **test PR-AUC 0.530**, ROC-AUC 0.911) | 0.595 |
-| LightGBM without our behaviour features (ablation) | 0.624 |
-| LightGBM without Vesta's V columns (ablation) | 0.582 |
-| XGBoost | 0.574 |
-| Random forest | 0.461 |
-| Logistic regression | 0.447 |
-| Decision tree | 0.384 |
-| Isolation Forest (anomaly score) | 0.132 |
+| LightGBM without our history features (selected; **test PR-AUC 0.556**, ROC-AUC 0.910) | 0.624 |
+| LightGBM, all 442 features | 0.611 |
+| LightGBM without Vesta's V columns (ablation) | 0.610 |
+| XGBoost | 0.582 |
+| Random forest | 0.458 |
+| Logistic regression | 0.443 |
+| Decision tree | 0.385 |
+| Isolation Forest (anomaly score) | 0.123 |
 
-On the IEEE-CIS test period (3.49% fraud) the policy reviews or declines 6.0% of payments
-and flags 61.8% of fraud cases for review or decline. The ablation shows the card1 behaviour features
-*lower* validation PR-AUC: they track overall traffic volume, which drifts over time.
-That is the next feature iteration ([docs/ieee_cis.md](docs/ieee_cis.md#what-the-ablations-show)).
-
+On the IEEE-CIS test period (3.49% fraud) the policy reviews or declines 6.5% of payments
+and flags 65.7% of fraud cases. Feature version 1.0.0 scored test PR-AUC 0.530; a
+validation-only experiment found its card-group (card1) history features harmful, so
+1.1.0 removed them and lets validation choose whether to use the remaining client-level
+history features. It chose not to. The test set has been used twice (v1.0 and v1.1);
+see [docs/ieee_cis.md](docs/ieee_cis.md#behaviour-features-v110).
 To reproduce: run the PaySim commands above. Hyperparameter sampling, data
 sampling and model seeds are fixed. Multi-threaded LightGBM/XGBoost training
 is not guaranteed to be bit-identical across machines.
@@ -291,7 +292,7 @@ is not guaranteed to be bit-identical across machines.
 ## Tests
 
 ```powershell
-python -m pytest tests -q                # 253 tests, ~3 min (integration tests skip unless RISKSTREAM_TEST_* are set)
+python -m pytest tests -q                # 256 tests, ~3 min (integration tests skip unless RISKSTREAM_TEST_* are set)
 python -m pytest tests -q -m "not slow"  # skip the end-to-end training test
 python -m ruff check src tests
 ```
