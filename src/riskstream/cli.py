@@ -12,6 +12,10 @@ from riskstream.logging_config import get_logger, setup_logging
 
 logger = get_logger("riskstream.cli")
 
+# Datasets for the offline commands (prepare-data, build-features, train, tune-policy).
+# Serving, streaming and replay stay PaySim-format only (see docs/ieee_cis.md).
+OFFLINE_DATASETS = ["paysim", "synthetic", "ieee_cis"]
+
 
 def cmd_generate_synthetic(args: argparse.Namespace) -> int:
     from riskstream.data import synthetic_generator as sg
@@ -29,6 +33,13 @@ def cmd_generate_synthetic(args: argparse.Namespace) -> int:
 
 
 def cmd_prepare_data(args: argparse.Namespace) -> int:
+    if args.dataset == "ieee_cis":
+        from riskstream.data.ieee_cis import prepare
+
+        out = prepare(skip_eda=args.skip_eda)
+        print(json.dumps({"rows_valid": out["manifest"]["rows_valid"], "rows_rejected": out["manifest"]["rows_rejected"],
+                          "splits": out["split"]["splits"]}, indent=2))
+        return 0
     from riskstream.data.eda import run_eda
     from riskstream.data.ingestion import ingest, load_interim
     from riskstream.data.splitting import run_split
@@ -52,6 +63,13 @@ def cmd_prepare_data(args: argparse.Namespace) -> int:
 
 
 def cmd_build_features(args: argparse.Namespace) -> int:
+    if args.dataset == "ieee_cis":
+        from riskstream.features.ieee_cis import run_build_features as run_ieee
+
+        meta = run_ieee()
+        print(json.dumps({k: meta[k] for k in ("rows", "train_sampled", "n_features_full", "v_selection",
+                                               "seconds", "peak_rss_mb")}, indent=2))
+        return 0
     from riskstream.features.offline import run_build_features
 
     run_build_features(args.dataset)
@@ -204,23 +222,23 @@ def build_parser() -> argparse.ArgumentParser:
     g.set_defaults(func=cmd_generate_synthetic)
 
     d = sub.add_parser("prepare-data", help="Ingest, validate, run EDA and split a dataset")
-    d.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    d.add_argument("--dataset", default="paysim", choices=OFFLINE_DATASETS)
     d.add_argument("--skip-eda", action="store_true")
     d.set_defaults(func=cmd_prepare_data)
 
     f = sub.add_parser("build-features", help="Point-in-time feature tables for each split")
-    f.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    f.add_argument("--dataset", default="paysim", choices=OFFLINE_DATASETS)
     f.set_defaults(func=cmd_build_features)
 
     t = sub.add_parser("train", help="Train, tune, calibrate and evaluate models")
-    t.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    t.add_argument("--dataset", default="paysim", choices=OFFLINE_DATASETS)
     t.add_argument("--models", nargs="*", help="Subset of models from configs/model.yaml")
     t.add_argument("--n-trials", type=int, help="Override tuning trials per model")
     t.add_argument("--run-name", help="MLflow parent run name")
     t.set_defaults(func=cmd_train)
 
     pol = sub.add_parser("tune-policy", help="Choose decision thresholds for a saved model (no retraining)")
-    pol.add_argument("--dataset", default="paysim", choices=["paysim", "synthetic"])
+    pol.add_argument("--dataset", default="paysim", choices=OFFLINE_DATASETS)
     pol.add_argument("--bundle", help="Model bundle directory (default: newest candidate for the dataset)")
     pol.set_defaults(func=cmd_tune_policy)
 

@@ -26,9 +26,8 @@ from pathlib import Path
 
 import numpy as np
 
-from riskstream.config import PROJECT_ROOT, load_config
-from riskstream.features.offline import load_features
-from riskstream.features.registry import get_registry
+from riskstream.config import PROJECT_ROOT, dataset_config, load_config
+from riskstream.features.offline import load_features, registry_for
 from riskstream.logging_config import get_logger
 from riskstream.models.artifacts import load_bundle
 from riskstream.models.evaluation import CostMatrix, DecisionThresholds, optimize_thresholds, policy_cost
@@ -58,7 +57,7 @@ def tune_for_scores(y: np.ndarray, p: np.ndarray, amount: np.ndarray, cfg: dict)
 
 def run_policy_tuning(dataset: str, bundle_dir: Path) -> dict:
     cfg = load_config("thresholds")
-    registry = get_registry()
+    registry = registry_for(dataset)
     bundle = load_bundle(bundle_dir)
     feature_set = bundle.metadata.get("feature_set", "full")
     bundle = load_bundle(bundle_dir, registry.schema_hash(feature_set))
@@ -102,7 +101,8 @@ def run_policy_tuning(dataset: str, bundle_dir: Path) -> dict:
     path.write_text(json.dumps(policy, indent=2))
     report = PROJECT_ROOT / "reports" / "policy" / f"{bundle.model_version}-{stem}.md"
     report.parent.mkdir(parents=True, exist_ok=True)
-    report.write_text(render_policy_report(policy, bundle.metadata.get("is_synthetic_data", False)))
+    report.write_text(render_policy_report(policy, bundle.metadata.get("is_synthetic_data", False),
+                                           dataset_config(dataset).get("disclaimer", "")))
     logger.info("Wrote policy %s and report %s", path, report)
     return {"policy": str(path), "report": str(report), "thresholds": policy["thresholds"],
             "val_rates": policy["val"]["rates"], "test_rates": policy["test"]["rates"]}
@@ -116,11 +116,11 @@ def _th(t: float) -> str:
     return "never" if t > 1.0 else f"{t:.4f}"
 
 
-def render_policy_report(p: dict, is_synthetic: bool) -> str:
+def render_policy_report(p: dict, is_synthetic: bool, disclaimer: str = "") -> str:
     cm = p["cost_matrix"]
     L = [f"# Decision policy {p['policy_version']} for model {p['model_version']}", ""]
     L += ["> " + ("Synthetic data: illustrates the mechanics only." if is_synthetic else
-                  "PaySim is a simulation, and the costs are assumptions, not business-approved figures."), ""]
+                  f"{disclaimer} The costs are assumptions, not business-approved figures.".strip()), ""]
     L += [f"- Owner: {p['owner']}. Approval status: **{p['approval']['status']}**.",
           f"- Thresholds chosen on validation ({p['tuned_on']['rows']:,} rows, {p['tuned_on']['fraud']:,} fraud): "
           f"REVIEW at p >= {_th(p['thresholds']['review'])}, DECLINE at p >= {_th(p['thresholds']['decline'])}.",

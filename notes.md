@@ -401,3 +401,34 @@ rules engine (for example for blocklists) in front of the model.
 | 2 | **Add IEEE-CIS** as a second dataset through the existing adapter design, and retrain | Realistic results and richer feature work |
 | 3 | **Phase 9 load test** (k6 or Locust) | Real numbers on how far one laptop setup goes and where it breaks |
 | 4 | **Phase 10 on AWS**, only if you want cloud experience and only with explicit approval (it costs money) | Experience running managed services |
+
+---
+
+## 7. IEEE-CIS added as a second dataset (offline)
+
+- **Phase:** between Phase 6 and Phase 7 (repeats Phases 1-2 for real data).
+- **Before:** only PaySim (simulated). Its fraud is a simulator artifact, so test PR-AUC
+  was 0.9999: an impressive-looking number that says nothing about real fraud.
+- **Problem:** the pipeline had never been shown to work on real data, and the results
+  were not believable.
+- **Change:**
+  - adapter, validation, EDA and day-based split for IEEE-CIS
+    (`src/riskstream/data/adapters/ieee_cis.py`, `src/riskstream/data/ieee_cis.py`);
+  - 449 features: source columns, de-duplicated V columns (281 of 339), category
+    encodings learned from training rows only, and point-in-time behaviour per card1 and
+    per client (uid) (`src/riskstream/features/ieee_cis.py`, `configs/ieee_cis_features.yaml`);
+  - per-dataset model config (`configs/model_ieee_cis.yaml`); training, calibration,
+    cost policy and model bundles reused unchanged;
+  - CLI: `--dataset ieee_cis` for prepare-data, build-features, train, tune-policy;
+  - docs: `docs/ieee_cis.md`, ADR 0011; 15 new tests.
+- **Problems found on the way:**
+  - the identity join reordered rows (Polars does not keep row order in joins by default),
+    so validation reported 2,332 time-order violations; fixed with `maintain_order="left"`,
+    with a regression test;
+  - 3 exact duplicate records in the source were quarantined.
+- **Result:** test PR-AUC **0.530** (ROC-AUC 0.911) for the selected LightGBM; 61.8% of
+  test fraud flagged while reviewing or declining 6.0% of payments. Full training run
+  56 min, peak memory 2.5 GB, with Docker stopped.
+- **Finding to act on:** without our card1 behaviour features, validation PR-AUC is
+  *higher* (0.624 vs 0.595, same hyperparameters). They follow total traffic volume, which
+  changes week to week. The next feature version should fix or drop them.

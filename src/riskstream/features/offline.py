@@ -115,7 +115,21 @@ def build_feature_frame(lf: pl.LazyFrame, registry: FeatureRegistry,
 
 
 def features_dir(dataset: str) -> Path:
+    if dataset == "ieee_cis":
+        from riskstream.features.ieee_cis import features_dir as ieee_features_dir
+
+        return ieee_features_dir()
     return resolve_path(dataset_config(dataset)["processed_dir"]) / "features" / f"v{get_registry().version}"
+
+
+def registry_for(dataset: str):
+    """Feature registry for a dataset: PaySim-format datasets share one; IEEE-CIS has its own,
+    loaded from the fitted encoders and V selection next to its feature tables."""
+    if dataset == "ieee_cis":
+        from riskstream.features.ieee_cis import IEEERegistry
+
+        return IEEERegistry.load()
+    return get_registry()
 
 
 def run_build_features(dataset: str) -> dict:

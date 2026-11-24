@@ -200,8 +200,20 @@ writes PaySim's raw format, so it goes through the same pipeline. Use it for
 tests, CI and demos. Its fraud comes from a few hand-written rules, so model
 scores on it mean nothing.
 
-**IEEE-CIS**: not implemented. It would need its own adapter, because its
-columns share nothing with PaySim.
+**IEEE-CIS** ([Kaggle competition](https://www.kaggle.com/competitions/ieee-fraud-detection)):
+real, anonymized e-commerce card transactions. Place `train_transaction.csv` and
+`train_identity.csv` in `data/raw/ieee-cis/` (the unlabelled `test_*` files are not
+used). It has its own adapter, validation, features and model config, and is used
+**offline only** (data, features, training, evaluation). Details: [docs/ieee_cis.md](docs/ieee_cis.md),
+[ADR 0011](docs/decisions/0011-ieee-cis-offline-dataset.md).
+
+```powershell
+$env:MLFLOW_TRACKING_URI = "sqlite:///$($PWD -replace '\\','/')/mlflow.db"   # when the MLflow container is off
+python -m riskstream.cli prepare-data   --dataset ieee_cis
+python -m riskstream.cli build-features --dataset ieee_cis
+python -m riskstream.cli train          --dataset ieee_cis   # ~56 min, peak 2.5 GB: stop Docker first
+python -m riskstream.cli tune-policy    --dataset ieee_cis
+```
 
 ## Methodology
 
@@ -254,6 +266,24 @@ Decision thresholds are tuned separately from the model with
 the current cost assumptions, 0.11% of validation payments go to REVIEW and
 1.62% are declined.
 
+IEEE-CIS run, `reports/model_evaluation/20261124055551-ieee_cis/report.md`:
+
+| model | validation PR-AUC |
+|---|---:|
+| LightGBM (selected; **test PR-AUC 0.530**, ROC-AUC 0.911) | 0.595 |
+| LightGBM without our behaviour features (ablation) | 0.624 |
+| LightGBM without Vesta's V columns (ablation) | 0.582 |
+| XGBoost | 0.574 |
+| Random forest | 0.461 |
+| Logistic regression | 0.447 |
+| Decision tree | 0.384 |
+| Isolation Forest (anomaly score) | 0.132 |
+
+On the IEEE-CIS test period (3.49% fraud) the policy reviews or declines 6.0% of payments
+and flags 61.8% of fraud cases for review or decline. The ablation shows the card1 behaviour features
+*lower* validation PR-AUC: they track overall traffic volume, which drifts over time.
+That is the next feature iteration ([docs/ieee_cis.md](docs/ieee_cis.md#what-the-ablations-show)).
+
 To reproduce: run the PaySim commands above. Hyperparameter sampling, data
 sampling and model seeds are fixed. Multi-threaded LightGBM/XGBoost training
 is not guaranteed to be bit-identical across machines.
@@ -261,7 +291,7 @@ is not guaranteed to be bit-identical across machines.
 ## Tests
 
 ```powershell
-python -m pytest tests -q                # 238 tests, ~2.5 min (integration tests skip unless RISKSTREAM_TEST_* are set)
+python -m pytest tests -q                # 253 tests, ~3 min (integration tests skip unless RISKSTREAM_TEST_* are set)
 python -m pytest tests -q -m "not slow"  # skip the end-to-end training test
 python -m ruff check src tests
 ```

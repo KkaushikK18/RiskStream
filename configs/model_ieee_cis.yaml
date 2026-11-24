@@ -1,0 +1,85 @@
+# IEEE-CIS model experiments. Keys here replace the same keys in model.yaml
+# (models, anomaly_detection); everything else (seed, calibration, evaluation,
+# selection metric) comes from model.yaml.
+#
+# Sizes: train_sampled ~115.6k rows x 449 features (float32 ~210 MB). Search spaces
+# and trial counts keep one full run within ~1 h on the development laptop.
+models:
+  logistic_regression:
+    # Integer category codes are not ordinal: linear models get frequency encodings only.
+    feature_set: linear
+    n_trials: 4
+    fixed: {max_iter: 500}
+    search:
+      C: {loguniform: [0.001, 1.0]}
+      class_weight: {choice: [null, balanced]}
+  decision_tree:
+    feature_set: full
+    n_trials: 6
+    search:
+      max_depth: {int: [6, 16]}
+      min_samples_leaf: {choice: [20, 50, 100, 200]}
+      class_weight: {choice: [null, balanced]}
+  random_forest:
+    feature_set: full
+    n_trials: 2
+    fixed: {max_samples: 0.5, n_estimators: 200}
+    search:
+      max_depth: {choice: [16, 24]}
+      min_samples_leaf: {choice: [5, 20]}
+      max_features: {choice: [sqrt, 0.2]}
+      class_weight: {choice: [null, balanced_subsample]}
+  xgboost:
+    feature_set: full
+    n_trials: 8
+    fixed: {tree_method: hist, max_bin: 256}
+    search:
+      n_estimators: {choice: [400, 800, 1200]}
+      max_depth: {int: [6, 12]}
+      learning_rate: {loguniform: [0.02, 0.1]}
+      subsample: {float: [0.7, 1.0]}
+      colsample_bytree: {float: [0.3, 0.8]}
+      min_child_weight: {loguniform: [1.0, 20.0]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 3.0]}
+  lightgbm:
+    feature_set: full
+    n_trials: 10
+    search:
+      n_estimators: {choice: [400, 800, 1200]}
+      num_leaves: {choice: [63, 127, 255]}
+      learning_rate: {loguniform: [0.02, 0.1]}
+      min_child_samples: {choice: [20, 50, 100]}
+      subsample: {float: [0.7, 1.0]}
+      colsample_bytree: {float: [0.3, 0.8]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 3.0]}
+  # Ablation: without Vesta's 281 kept V columns (we could not compute them ourselves).
+  lightgbm_no_vesta_v:
+    estimator: lightgbm
+    feature_set: no_vesta_v
+    candidate_eligible: false
+    n_trials: 6
+    search: &lgb_ablation
+      n_estimators: {choice: [400, 800, 1200]}
+      num_leaves: {choice: [63, 127, 255]}
+      learning_rate: {loguniform: [0.02, 0.1]}
+      min_child_samples: {choice: [20, 50, 100]}
+      subsample: {float: [0.7, 1.0]}
+      colsample_bytree: {float: [0.3, 0.8]}
+      reg_lambda: {loguniform: [0.1, 20.0]}
+      scale_pos_weight: {choice: [1.0, 3.0]}
+  # Ablation: without our point-in-time card1 / uid behaviour features.
+  lightgbm_no_behavior:
+    estimator: lightgbm
+    feature_set: no_behavior
+    candidate_eligible: false
+    n_trials: 6
+    search: *lgb_ablation
+
+anomaly_detection:
+  isolation_forest:
+    feature_set: full
+    n_estimators: 200
+    max_samples: 256
+    train_on: legit_only

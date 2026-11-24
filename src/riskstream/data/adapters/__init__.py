@@ -18,9 +18,8 @@ def get_adapter(dataset: str, raw_path: Path | None = None) -> DatasetAdapter:
     if dataset == "synthetic":
         # The generator emits PaySim-format columns, so the same adapter applies.
         return PaySimAdapter(path, id_prefix="syn", is_synthetic_data=True, name="synthetic")
-    # IEEE-CIS would get its own adapter here: its columns (TransactionDT,
-    # card1..card6, V1..V339, ...) share nothing with PaySim.
-    raise ValueError(f"No adapter registered for dataset '{dataset}'")
+    # IEEE-CIS has its own schema and pipeline: riskstream.data.ieee_cis.
+    raise ValueError(f"No PaySim-format adapter for dataset '{dataset}'")
 
 
 __all__ = ["DatasetAdapter", "PaySimAdapter", "get_adapter"]

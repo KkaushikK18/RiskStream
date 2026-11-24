@@ -31,9 +31,8 @@ import numpy as np  # noqa: E402
 import polars as pl  # noqa: E402
 from sklearn.metrics import average_precision_score, precision_recall_curve  # noqa: E402
 
-from riskstream.config import PROJECT_ROOT, get_settings, load_config  # noqa: E402
-from riskstream.features.offline import features_dir, load_features  # noqa: E402
-from riskstream.features.registry import get_registry  # noqa: E402
+from riskstream.config import CONFIG_DIR, PROJECT_ROOT, dataset_config, get_settings, load_config  # noqa: E402
+from riskstream.features.offline import features_dir, load_features, registry_for  # noqa: E402
 from riskstream.logging_config import get_logger  # noqa: E402
 from riskstream.models.artifacts import BUNDLE_FORMAT, ModelBundle, library_versions, load_bundle  # noqa: E402
 from riskstream.models.calibration import select_calibrator  # noqa: E402
@@ -190,11 +189,19 @@ def _plot_importance(imp: dict[str, float], path: Path, title: str) -> None:
     plt.close(fig)
 
 
+def model_config(dataset: str) -> dict:
+    """configs/model.yaml, with keys replaced by configs/model_<dataset>.yaml when it exists."""
+    cfg = load_config("model")
+    if (CONFIG_DIR / f"model_{dataset}.yaml").exists():
+        cfg |= load_config(f"model_{dataset}")
+    return cfg
+
+
 def run_training(dataset: str, models: list[str] | None = None, n_trials: int | None = None,
                  run_name: str | None = None) -> dict:
-    mcfg = load_config("model")
+    mcfg = model_config(dataset)
     tcfg = load_config("thresholds")
-    registry = get_registry()
+    registry = registry_for(dataset)
     cm = CostMatrix.from_config()
     seed, n_jobs = int(mcfg["random_seed"]), int(mcfg["n_jobs"])
     eval_cfg = mcfg["evaluation"]
@@ -365,8 +372,8 @@ def run_training(dataset: str, models: list[str] | None = None, n_trials: int | 
         if results[cand]["feature_importance"]:
             _plot_importance(results[cand]["feature_importance"], report_dir / "importance_candidate.png",
                              f"{cand} feature importance")
-        for n in ("lightgbm_no_balance",):
-            if n in results and results[n]["feature_importance"]:
+        for n in [m for m, r in results.items() if not r["candidate_eligible"]]:
+            if results[n]["feature_importance"]:
                 _plot_importance(results[n]["feature_importance"], report_dir / f"importance_{n}.png",
                                  f"{n} feature importance")
 
@@ -377,6 +384,7 @@ def run_training(dataset: str, models: list[str] | None = None, n_trials: int | 
             "candidate_bundle": str(bundle_dir), "reload_predictions_identical": same,
             "supervised": results, "anomaly_detection": anomaly, "candidate_test": test_eval,
             "data": {"train_sampled": fmanifest["train_sampled"], "rows": fmanifest["rows"]},
+            "disclaimer": dataset_config(dataset).get("disclaimer", ""),
         }
         (report_dir / "results.json").write_text(json.dumps(summary, indent=2, default=str))
         (report_dir / "report.md").write_text(render_report(summary))
@@ -396,10 +404,8 @@ def _pct(x: float | None) -> str:
 def render_report(s: dict) -> str:
     sup, cand = s["supervised"], s["selection"]["candidate"]
     L = [f"# Model evaluation {s['version']}", ""]
-    L += ["> " + ("Synthetic generator data: these numbers only show the pipeline runs."
-                  if s["is_synthetic_data"] else
-                  "PaySim is a simulation. These results do not represent performance on real "
-                  "payment fraud."), ""]
+    L += ["> " + (s.get("disclaimer") or ("Synthetic generator data: these numbers only show the pipeline runs."
+                                          if s["is_synthetic_data"] else "")), ""]
     L += [f"- Dataset `{s['dataset']}`, feature version `{s['feature_version']}`, git "
           f"`{(s['git']['commit'] or 'n/a')[:10]}`{' (uncommitted changes)' if s['git']['dirty'] else ''}, "
           f"MLflow run `{s['mlflow_run_id']}`.",
@@ -469,5 +475,5 @@ def render_report(s: dict) -> str:
     tm = t["at_review_threshold"]
     L += ["", f"Test confusion at the REVIEW threshold: TP {tm['tp']:,}, FP {tm['fp']:,}, FN {tm['fn']:,}, TN {tm['tn']:,}.",
           "", "## Figures", "", "- `pr_curves_val.png`", "- `calibration_candidate.png`",
-          "- `importance_candidate.png`", "- `importance_lightgbm_no_balance.png` (if trained)", ""]
+          "- `importance_candidate.png`", "- `importance_<ablation>.png` for each ablation model", ""]
     return "\n".join(L)

@@ -1,0 +1,57 @@
+# IEEE-CIS feature configuration (offline). Changing anything that alters feature
+# values requires bumping `version`. PaySim features are in features.yaml.
+version: "ieee-1.0.0"
+
+# Point-in-time behaviour per entity: for a transaction at time t, a window of W
+# days covers the entity's transactions with time in [t - W*86400, t - 1] seconds.
+# Transactions at the same second as t (including t itself) are never used.
+windows_days: [1, 7, 30]
+
+# Entities whose history is aggregated.
+#   card1 : the card-number group (13k values). Many cards share one card1.
+#   uid   : card1 + addr1 + (day - D1). D1 is "days since the card was first seen",
+#           so day - D1 is that first day and stays constant for one card holder.
+#           A widely used approximation of one client; NaN when addr1 or D1 is missing.
+entities: [card1, uid]
+
+# String columns encoded with vocabularies learned on the TRAINING split only:
+#   <col>_code : rank by training frequency (0 = most common); unseen or rare -> NaN
+#   <col>_freq : share of training rows with that value (missing is its own value)
+categorical:
+  max_vocabulary: 200          # rarer values share one "rare" code
+  min_count: 20                # values seen fewer times in training count as rare
+  columns: [ProductCD, card4, card6, P_emaildomain, R_emaildomain, M4,
+            id_12, id_15, id_16, id_23, id_27, id_28, id_29, id_30, id_31, id_33,
+            id_34, id_35, id_36, id_37, id_38, DeviceType, DeviceInfo]
+
+# Numeric identifiers that are also frequency encoded (training split only).
+frequency_numeric: [card1, card2, card3, card5, addr1, addr2]
+
+# Vesta's 339 engineered V columns are heavily redundant. On a deterministic sample
+# of training rows, columns are grouped by their missing-value count, and within
+# a group a column is dropped when |Pearson r| > threshold with a column already kept.
+v_selection:
+  sample_rows: 150000
+  correlation_threshold: 0.95
+  seed: 42
+
+feature_sets:
+  full: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
+         vesta_v, identity, category_code, category_freq, card1_behavior, uid_behavior]
+  # Logistic regression: integer category codes are not ordinal, so linear models
+  # get only the frequency encodings.
+  linear: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
+           vesta_v, identity, category_freq, card1_behavior, uid_behavior]
+  # Ablation: without Vesta's V columns. We could not compute them in our own
+  # real-time pipeline, so this measures how much the model depends on them.
+  no_vesta_v: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
+               identity, category_code, category_freq, card1_behavior, uid_behavior]
+  # Ablation: without our point-in-time behaviour features.
+  no_behavior: [transaction, time, card_address, vesta_counts, vesta_timedeltas, vesta_match,
+                vesta_v, identity, category_code, category_freq]
+
+# Training-only undersampling of legitimate rows (validation and test keep the
+# real class balance). IEEE-CIS has 3.5% fraud, so a higher rate than PaySim's.
+training_sampling:
+  negative_sample_rate: 0.25
+  seed: 42

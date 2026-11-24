@@ -20,6 +20,7 @@ datasets:
     split:
       train_end_step: 595
       val_end_step: 669
+    disclaimer: PaySim is a simulation. These results do not represent performance on real payment fraud.
 
   synthetic:
     description: >-
@@ -34,7 +35,30 @@ datasets:
     split:
       train_end_step: 160
       val_end_step: 200
+    disclaimer: 'Synthetic generator data: these numbers only show the pipeline runs.'
 
+  ieee_cis:
+    description: >-
+      IEEE-CIS Fraud Detection (Vesta Corporation, Kaggle 2019). Real, anonymized
+      e-commerce card transactions. Only the labelled train_* files are used;
+      test_* has no labels. Kaggle competition data: not redistributed.
+    source_url: https://www.kaggle.com/competitions/ieee-fraud-detection
+    raw_path: data/raw/ieee-cis/train_transaction.csv
+    identity_path: data/raw/ieee-cis/train_identity.csv
+    interim_dir: data/interim/ieee_cis
+    processed_dir: data/processed/ieee_cis
+    eda_dir: reports/eda/ieee_cis
+    # TransactionDT is seconds from an undisclosed reference; its minimum is 86400.
+    # day = (TransactionDT - 86400) // 86400, so days run 0..181.
+    temporal_column: day
+    # Inclusive upper bounds in days: ~70.7% / 14.2% / 15.1% of rows, fraud rate
+    # 3.53% / 3.38% / 3.49% (measured 2026-11-23).
+    split:
+      train_end_day: 120
+      val_end_day: 150
+    disclaimer: >-
+      IEEE-CIS is real but anonymized: column meanings are partly hidden, the costs
+      in configs/thresholds.yaml are assumptions, and results apply to this dataset only.
 synthetic_generator:
   seed: 42
   num_transactions: 50000
